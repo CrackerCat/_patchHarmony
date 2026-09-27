@@ -31,6 +31,28 @@ DLC_COMPAT_OBJS += compat/selftest.o
 endif
 droid_lkm_compat-y := $(DLC_COMPAT_OBJS) $(DEPS_OBJS_ALL)
 
+# third ko in the same Kbuild: kernel features the device lacks, container scoped
+#   xt matches and targets through the exported registration API
+#   cgroup pids and device effect, devtmpfs, optional link types
+obj-m += droid_lkm_misc.o
+DLM_OBJS := src/misc/misc_main.o \
+	src/misc/misc_ksym.o \
+	src/misc/misc_scope.o \
+	src/misc/misc_proc.o \
+	src/misc/xt/xt_reg.o \
+	src/misc/xt/xt_addrtype.o \
+	src/misc/devtmpfs/devtmpfs.o \
+	src/misc/userns/userns_core.o \
+	src/misc/userns/userns_map.o \
+	src/misc/userns/userns_cred.o \
+	src/misc/userns/userns_nsops.o \
+	src/misc/userns/userns_owner.o \
+	src/misc/userns/userns_proc.o \
+	src/misc/userns/userns_selftest.o \
+	src/misc/userns/userns_captrace.o \
+	src/misc/userns/userns_hooks.o
+droid_lkm_misc-y := $(DLM_OBJS) $(DEPS_OBJS_ALL)
+
 droid_lkm-y := src/core/main.o \
 	src/core/ds_ksym.o \
 	src/slot/ds_slot.o \
@@ -64,6 +86,8 @@ ccflags-y += -I$(src)/src/core -I$(src)/src/slot -I$(src)/src/pidns
 ccflags-y += -I$(src)/src/ipcns -I$(src)/src/ipcns/sysv
 ccflags-y += -I$(src)/src/ipcns/mqueue -I$(src)/src/ipcns/sysctl
 ccflags-y += -I$(src)/src/ipcns/compat
+ccflags-y += -I$(src)/src/misc -I$(src)/src/misc/xt -I$(src)/src/misc/userns
+ccflags-y += -I$(src)/src/misc/devtmpfs
 ccflags-y += $(addprefix -I$(src)/,$(DEPS_INCS_ALL))
 
 # KernCall: enable sys_call_table slot patching

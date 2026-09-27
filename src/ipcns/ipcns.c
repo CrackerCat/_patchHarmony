@@ -90,7 +90,8 @@ struct ipc_namespace *droid_lkm_ipcns_create(void)
 
 	ns->ns.ops = &droid_lkm_ipcns_ops;
 	refcount_set(&ns->ns.count, 1);
-	ns->user_ns = &init_user_ns;
+	/* same ownership rule as the fake pid namespace, see droid_lkm_pidns_create */
+	ns->user_ns = current_cred()->user_ns;
 	ns->ucounts = NULL;
 
 	err = msg_init_ns(ns);

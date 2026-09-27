@@ -165,8 +165,14 @@ struct pid_namespace *droid_lkm_pidns_create(struct pid_namespace *parent)
 	refcount_set(&ns->ns.count, 1);
 	ns->level = level;
 	ns->parent = parent;
-	// fake ns cannot reach kernel destroy path so no user_ns ref and no ucounts
-	ns->user_ns = &init_user_ns;
+	/*
+	 * Ownership follows the creating task's user namespace, so ns_capable()
+	 * on this namespace is correct whether or not the userns module is
+	 * loaded. No reference is taken: a fake namespace never reaches the
+	 * kernel destroy path, and the userns module clears this field before it
+	 * releases a user namespace.
+	 */
+	ns->user_ns = current_cred()->user_ns;
 	ns->ucounts = NULL;
 	ns->pid_allocated = PIDNS_ADDING;
 

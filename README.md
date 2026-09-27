@@ -8,10 +8,16 @@ project supplies those features from loadable modules, without recompiling the
 kernel and without moving a single struct member, so prebuilt vendor modules
 keep working.
 
-two modules are built:
+this repository is the `Kern/` submodule of the Droidspaces fork, published as
+`git@github.com:Dere3046/_patchHarmony.git`.
+
+three modules are built:
 
 - `droid_lkm.ko` namespace and IPC support
 - `droid_lkm_compat.ko` vendor module quick fixups
+- `droid_lkm_misc.ko` the features this device kernel has compiled out that a
+  container still expects: runtime registered xt matches, a user namespace that
+  can be unshared, the per task id map files, and the control plane below
 
 ## what it provides
 
@@ -27,6 +33,9 @@ two modules are built:
   vendor module asks `find_task_by_vpid` for a pid that only exists inside a
   container namespace, and a bounded pid value on that task for vendor code
   that indexes arrays by `p->pid`
+- the third module's surface: `/proc/<pid>/{uid_map,gid_map,setgroups}` and
+  `/proc/droid_lkm_misc/{status,version}`, so a userspace can ask what is
+  installed instead of probing for behaviour it may not get
 
 ## requirements
 
@@ -52,17 +61,23 @@ exact revision of each one.
 
 	insmod droid_lkm.ko
 	insmod droid_lkm_compat.ko
+	insmod droid_lkm_misc.ko
 
 load `droid_lkm.ko` before any container starts, then `droid_lkm_compat.ko` for
-the vendor fixups. both modules resolve their kernel symbols at load time and
-report anything they cannot find; a missing core symbol aborts the load instead
-of leaving a half installed hook behind.
+the vendor fixups, then `droid_lkm_misc.ko`. the third resolves the one entry
+point it wants from the first by name at load time, so it also works alone.
+every module resolves its kernel symbols at load time and reports anything it
+cannot find; a missing core symbol aborts the load instead of leaving a half
+installed hook behind.
 
 module parameters cover the usual cases: `mqueue`, `gate`, `verbose`,
 `skip_sysvipc` and `no_fake_ns` on the first module, `skip_do_exit` on its pid
-namespace part, `ghost` and `ghost_match` on the second. each one is documented
-in its own `MODULE_PARM_DESC`. `ghost_match` selects vendor modules by name
-prefix and defaults to `oplus_`, `*` matches every caller.
+namespace part, `ghost` and `ghost_match` on the second, `xt`, `userns` and
+`captrace` and `devtmpfs` on the third, plus a write only `release` described
+below. each one is documented in its own `MODULE_PARM_DESC`.
+`ghost_match` selects vendor modules by name prefix and defaults to `oplus_`,
+`*` matches every caller. `captrace` logs every capability decision the kernel
+refuses to a container task, with the function that asked for it.
 
 ## vendor compatibility
 
@@ -82,14 +97,23 @@ rely on that pattern, so the compat half is not needed there.
 
 ## known limits
 
-- no user namespaces
-- no devtmpfs
+- the user namespace is at its first level: unshare and clone produce one, the
+  credential, the namespace owners and the id map files are right, but the map is
+  the identity map, so a write that asks for anything else, and `setgroups` in a
+  container, are refused rather than half honoured
+- no idmapped mount lens, so a non identity mount cannot be permission checked
 - no cgroup pids or device controllers
-- no nftables match set
+- no nftables match set, and only the addrtype xt match is ported so far
 - `NSpid` and its siblings are printed at the end of `/proc/<pid>/status`
-- namespace lifetime is owned by the module, so unloading while a container runs
-  leaves that namespace neutralized
-- the regression harness is not part of this repository
+- devtmpfs' superblock holds a reference to the module, so `rmmod` is refused
+  while any mount of it is alive, which is what keeps a lazily unmounted
+  superblock from being torn down after the code is gone. write `1` to
+  `/sys/module/droid_lkm_misc/parameters/release` to drop the internal mount
+  before unloading, the same discipline as unmounting before `rmmod`
+- namespace lifetime is owned by the module: unloading while a container runs
+  leaves that namespace neutralized, and a namespace is not freed until then, so
+  `unshare(CLONE_NEWUSER)` leaves an object behind. `status` reports how many are
+  live
 
 ## credits
 

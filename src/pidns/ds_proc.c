@@ -82,6 +82,81 @@ static enum droid_lkm_ns_kind droid_lkm_ns_name_kind(const char *name, unsigned 
 	return DROID_LKM_NS_NONE;
 }
 
+/*
+ * Extension point for namespace kinds owned by an optional module. The list is
+ * short and is written only at load and unload time.
+ */
+#define DROID_LKM_NS_KIND_MAX 4
+
+static const struct droid_lkm_ns_kind_reg *droid_lkm_ns_kinds[DROID_LKM_NS_KIND_MAX];
+static DEFINE_MUTEX(droid_lkm_ns_kinds_lock);
+
+int droid_lkm_ns_kind_register(const struct droid_lkm_ns_kind_reg *kind)
+{
+	int i;
+
+	if (!kind || !kind->name || !kind->ops_for)
+		return -EINVAL;
+
+	mutex_lock(&droid_lkm_ns_kinds_lock);
+	for (i = 0; i < DROID_LKM_NS_KIND_MAX; i++) {
+		if (droid_lkm_ns_kinds[i] == kind) {
+			mutex_unlock(&droid_lkm_ns_kinds_lock);
+			return 0;
+		}
+	}
+	for (i = 0; i < DROID_LKM_NS_KIND_MAX; i++) {
+		if (!droid_lkm_ns_kinds[i]) {
+			droid_lkm_ns_kinds[i] = kind;
+			mutex_unlock(&droid_lkm_ns_kinds_lock);
+			return 0;
+		}
+	}
+	mutex_unlock(&droid_lkm_ns_kinds_lock);
+	return -ENOSPC;
+}
+EXPORT_SYMBOL_GPL(droid_lkm_ns_kind_register);
+
+void droid_lkm_ns_kind_unregister(const struct droid_lkm_ns_kind_reg *kind)
+{
+	int i;
+
+	mutex_lock(&droid_lkm_ns_kinds_lock);
+	for (i = 0; i < DROID_LKM_NS_KIND_MAX; i++) {
+		if (droid_lkm_ns_kinds[i] == kind)
+			droid_lkm_ns_kinds[i] = NULL;
+	}
+	mutex_unlock(&droid_lkm_ns_kinds_lock);
+}
+EXPORT_SYMBOL_GPL(droid_lkm_ns_kind_unregister);
+
+static struct dentry *droid_lkm_ns_kind_lookup(struct dentry *dentry,
+					  struct task_struct *task,
+					  struct dentry *fallback)
+{
+	const struct proc_ns_operations *ops = NULL;
+	int i;
+
+	mutex_lock(&droid_lkm_ns_kinds_lock);
+	for (i = 0; i < DROID_LKM_NS_KIND_MAX; i++) {
+		const struct droid_lkm_ns_kind_reg *kind = droid_lkm_ns_kinds[i];
+
+		if (!kind)
+			continue;
+		if (strlen(kind->name) != dentry->d_name.len ||
+		    memcmp(kind->name, dentry->d_name.name, dentry->d_name.len))
+			continue;
+		ops = kind->ops_for(task);
+		break;
+	}
+	mutex_unlock(&droid_lkm_ns_kinds_lock);
+
+	if (!ops)
+		return fallback;
+
+	return droid_lkm_ns_instantiate(dentry, task, ops);
+}
+
 static struct dentry *droid_lkm_ns_lookup(struct inode *dir, struct dentry *dentry,
 				   unsigned int flags)
 {
@@ -95,8 +170,16 @@ static struct dentry *droid_lkm_ns_lookup(struct inode *dir, struct dentry *dent
 		return res;
 
 	kind = droid_lkm_ns_name_kind(dentry->d_name.name, dentry->d_name.len);
-	if (!kind)
-		return res;
+	if (!kind) {
+		struct dentry *reg;
+
+		task = get_proc_task(dir);
+		if (!task)
+			return res;
+		reg = droid_lkm_ns_kind_lookup(dentry, task, res);
+		put_task_struct(task);
+		return reg;
+	}
 
 	task = get_proc_task(dir);
 	if (!task)
