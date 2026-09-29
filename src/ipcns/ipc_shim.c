@@ -13,6 +13,7 @@
 #include <linux/rcupdate.h>
 
 #include "ds.h"
+#include "ds_caps.h"
 #include "ds_ksym.h"
 #include "ds_ipc_compat.h"
 
@@ -78,16 +79,20 @@ static struct droid_lkm_task_ipc *droid_lkm_task_ipc_get(struct task_struct *tsk
 	return e;
 }
 
-unsigned long droid_lkm_do_mmap(struct file *file, unsigned long addr,
+__nocfi noinline unsigned long droid_lkm_do_mmap(struct file *file, unsigned long addr,
 			 unsigned long len, unsigned long prot,
 			 unsigned long flags, unsigned long vm_flags,
 			 unsigned long pgoff, unsigned long *populate,
 			 struct list_head *uf)
 {
-	if (!droid_lkm_ks.do_mmap)
+	/* vm_flags landed in the middle of the argument list in 6.6 */
+	if (droid_lkm_caps.mmap_takes_vm_flags)
+		return droid_lkm_ks.do_mmap(file, addr, len, prot, flags,
+					    vm_flags, pgoff, populate, uf);
+	if (!droid_lkm_ks.do_mmap_legacy)
 		return -ENOSYS;
-	return droid_lkm_ks.do_mmap(file, addr, len, prot, flags, vm_flags, pgoff,
-			     populate, uf);
+	return droid_lkm_ks.do_mmap_legacy(file, addr, len, prot, flags, pgoff,
+					   populate, uf);
 }
 
 void *droid_lkm_task_undo_list(struct task_struct *tsk)

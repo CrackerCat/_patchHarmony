@@ -26,6 +26,7 @@
 #include <linux/capability.h>
 #include "ds_ipc_compat.h"
 #include "ds_ipcns.h"
+#include <linux/version.h>
 #include <linux/msg.h>
 #include <linux/spinlock.h>
 #include <linux/init.h>
@@ -46,6 +47,101 @@
 #include <asm/current.h>
 #include <linux/uaccess.h>
 #include "ipc_util.h"
+
+/*
+ * per namespace message accounting. 6.1 holds the two counters in percpu
+ * counters whose local add and sub helpers have no equivalent before it; 5.10
+ * and 5.15 hold the same two quantities in the atomic counters of the same
+ * struct. both branches account the same bytes and headers, so MSG_INFO
+ * reports real numbers everywhere and the counters stay per namespace.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+
+static inline int droid_lkm_msg_acct_init(struct ipc_namespace *ns)
+{
+	int ret;
+
+	ret = percpu_counter_init(&ns->percpu_msg_bytes, 0, GFP_KERNEL);
+	if (ret)
+		return ret;
+	ret = percpu_counter_init(&ns->percpu_msg_hdrs, 0, GFP_KERNEL);
+	if (ret)
+		percpu_counter_destroy(&ns->percpu_msg_bytes);
+	return ret;
+}
+
+static inline void droid_lkm_msg_acct_exit(struct ipc_namespace *ns)
+{
+	percpu_counter_destroy(&ns->percpu_msg_bytes);
+	percpu_counter_destroy(&ns->percpu_msg_hdrs);
+}
+
+static inline void droid_lkm_msg_acct_bytes(struct ipc_namespace *ns, long bytes)
+{
+	percpu_counter_add_local(&ns->percpu_msg_bytes, bytes);
+}
+
+static inline void droid_lkm_msg_acct_hdrs(struct ipc_namespace *ns, long hdrs)
+{
+	percpu_counter_add_local(&ns->percpu_msg_hdrs, hdrs);
+}
+
+static inline long droid_lkm_msg_acct_bytes_read(struct ipc_namespace *ns)
+{
+	return percpu_counter_sum(&ns->percpu_msg_bytes);
+}
+
+static inline long droid_lkm_msg_acct_hdrs_read(struct ipc_namespace *ns)
+{
+	return percpu_counter_sum(&ns->percpu_msg_hdrs);
+}
+
+#else /* < 6.1 */
+
+/*
+ * the counters are per namespace here too, one pair per struct ipc_namespace,
+ * and the calls sit under the same locks, so plain atomics account exactly what
+ * the percpu counters account on the newer branches.
+ */
+
+static inline int droid_lkm_msg_acct_init(struct ipc_namespace *ns)
+{
+	atomic_set(&ns->msg_bytes, 0);
+	atomic_set(&ns->msg_hdrs, 0);
+	return 0;
+}
+
+static inline void droid_lkm_msg_acct_exit(struct ipc_namespace *ns)
+{
+}
+
+static inline void droid_lkm_msg_acct_bytes(struct ipc_namespace *ns, long bytes)
+{
+	if (bytes < 0)
+		atomic_sub(-bytes, &ns->msg_bytes);
+	else
+		atomic_add(bytes, &ns->msg_bytes);
+}
+
+static inline void droid_lkm_msg_acct_hdrs(struct ipc_namespace *ns, long hdrs)
+{
+	if (hdrs < 0)
+		atomic_dec(&ns->msg_hdrs);
+	else
+		atomic_inc(&ns->msg_hdrs);
+}
+
+static inline long droid_lkm_msg_acct_bytes_read(struct ipc_namespace *ns)
+{
+	return atomic_read(&ns->msg_bytes);
+}
+
+static inline long droid_lkm_msg_acct_hdrs_read(struct ipc_namespace *ns)
+{
+	return atomic_read(&ns->msg_hdrs);
+}
+
+#endif /* < 6.1 */
 
 /* one msq_queue structure for each present queue on the system */
 struct msg_queue {
@@ -288,10 +384,10 @@ static void freeque(struct ipc_namespace *ns, struct kern_ipc_perm *ipcp)
 	rcu_read_unlock();
 
 	list_for_each_entry_safe(msg, t, &msq->q_messages, m_list) {
-		percpu_counter_sub_local(&ns->percpu_msg_hdrs, 1);
+		droid_lkm_msg_acct_hdrs(ns, -1);
 		free_msg(msg);
 	}
-	percpu_counter_sub_local(&ns->percpu_msg_bytes, msq->q_cbytes);
+	droid_lkm_msg_acct_bytes(ns, -(long)msq->q_cbytes);
 	ipc_update_pid(&msq->q_lspid, NULL);
 	ipc_update_pid(&msq->q_lrpid, NULL);
 	ipc_rcu_putref(&msq->q_perm, msg_rcu_free);
@@ -496,18 +592,21 @@ static int msgctl_info(struct ipc_namespace *ns, int msqid,
 	msginfo->msgmax = ns->msg_ctlmax;
 	msginfo->msgmnb = ns->msg_ctlmnb;
 	msginfo->msgssz = MSGSSZ;
-	msginfo->msgseg = MSGSEG;
+	/*
+	 * MSGSEG is a ternary whose rejected arm does not fit unsigned short, and
+	 * msginfo::msgseg is unsigned short, so say the narrowing out loud: the
+	 * value the ternary selects always fits
+	 */
+	msginfo->msgseg = (unsigned short)MSGSEG;
 	down_read(&msg_ids(ns).rwsem);
 	if (cmd == MSG_INFO)
 		msginfo->msgpool = msg_ids(ns).in_use;
 	max_idx = ipc_get_maxidx(&msg_ids(ns));
 	up_read(&msg_ids(ns).rwsem);
 	if (cmd == MSG_INFO) {
-		msginfo->msgmap = min_t(int,
-				     percpu_counter_sum(&ns->percpu_msg_hdrs),
+		msginfo->msgmap = min_t(int, droid_lkm_msg_acct_hdrs_read(ns),
 				     INT_MAX);
-		msginfo->msgtql = min_t(int,
-		                     percpu_counter_sum(&ns->percpu_msg_bytes),
+		msginfo->msgtql = min_t(int, droid_lkm_msg_acct_bytes_read(ns),
 				     INT_MAX);
 	} else {
 		msginfo->msgmap = MSGMAP;
@@ -943,8 +1042,8 @@ static long do_msgsnd(int msqid, long mtype, void __user *mtext,
 		list_add_tail(&msg->m_list, &msq->q_messages);
 		msq->q_cbytes += msgsz;
 		msq->q_qnum++;
-		percpu_counter_add_local(&ns->percpu_msg_bytes, msgsz);
-		percpu_counter_add_local(&ns->percpu_msg_hdrs, 1);
+		droid_lkm_msg_acct_bytes(ns, msgsz);
+		droid_lkm_msg_acct_hdrs(ns, 1);
 	}
 
 	err = 0;
@@ -1167,8 +1266,8 @@ static long do_msgrcv(int msqid, void __user *buf, size_t bufsz, long msgtyp, in
 			msq->q_rtime = ktime_get_real_seconds();
 			ipc_update_pid(&msq->q_lrpid, task_tgid(current));
 			msq->q_cbytes -= msg->m_ts;
-			percpu_counter_sub_local(&ns->percpu_msg_bytes, msg->m_ts);
-			percpu_counter_sub_local(&ns->percpu_msg_hdrs, 1);
+			droid_lkm_msg_acct_bytes(ns, -(long)msg->m_ts);
+			droid_lkm_msg_acct_hdrs(ns, -1);
 			ss_wakeup(msq, &wake_q, false);
 
 			goto out_unlock0;
@@ -1313,19 +1412,11 @@ int msg_init_ns(struct ipc_namespace *ns)
 	ns->msg_ctlmnb = MSGMNB;
 	ns->msg_ctlmni = MSGMNI;
 
-	ret = percpu_counter_init(&ns->percpu_msg_bytes, 0, GFP_KERNEL);
+	ret = droid_lkm_msg_acct_init(ns);
 	if (ret)
-		goto fail_msg_bytes;
-	ret = percpu_counter_init(&ns->percpu_msg_hdrs, 0, GFP_KERNEL);
-	if (ret)
-		goto fail_msg_hdrs;
+		return ret;
 	ipc_init_ids(&ns->ids[IPC_MSG_IDS]);
 	return 0;
-
-fail_msg_hdrs:
-	percpu_counter_destroy(&ns->percpu_msg_bytes);
-fail_msg_bytes:
-	return ret;
 }
 
 #ifdef CONFIG_IPC_NS
@@ -1334,8 +1425,7 @@ void msg_exit_ns(struct ipc_namespace *ns)
 	free_ipcs(ns, &msg_ids(ns), freeque);
 	idr_destroy(&ns->ids[IPC_MSG_IDS].ipcs_idr);
 	rhashtable_destroy(&ns->ids[IPC_MSG_IDS].key_ht);
-	percpu_counter_destroy(&ns->percpu_msg_bytes);
-	percpu_counter_destroy(&ns->percpu_msg_hdrs);
+	droid_lkm_msg_acct_exit(ns);
 }
 #endif
 

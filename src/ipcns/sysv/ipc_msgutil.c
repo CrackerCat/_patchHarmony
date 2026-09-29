@@ -7,6 +7,7 @@
 #include <linux/spinlock.h>
 #include "ds_compat.h"
 #include "ds_ipc_compat.h"
+#include "ds_ipcns.h"
 #include <linux/init.h>
 #include <linux/security.h>
 #include <linux/slab.h>
@@ -28,11 +29,21 @@ DEFINE_SPINLOCK(mq_lock);
  * and not CONFIG_IPC_NS.
  */
 struct ipc_namespace init_ipc_ns = {
+	/* ns_common::count arrived in 5.15, before that the count is its own field */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 	.ns.count = REFCOUNT_INIT(1),
+#else
+	.count = REFCOUNT_INIT(1),
+#endif
 	.user_ns = &init_user_ns,
 	.ns.inum = PROC_IPC_INIT_INO,
 #ifdef CONFIG_IPC_NS
-	.ns.ops = &ipcns_operations,
+	/*
+	 * the kernel's own ipcns_operations is unexported, and the module hands
+	 * the host ipc namespace its own operations at load time anyway, so
+	 * start from those instead of linking a symbol the image may not carry
+	 */
+	.ns.ops = &droid_lkm_ipcns_ops,
 #endif
 };
 

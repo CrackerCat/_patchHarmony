@@ -26,25 +26,25 @@
 #include "ds_compat.h"
 #include "ds_ksym.h"
 
-void wake_q_add(struct wake_q_head *head, struct task_struct *task)
+__nocfi noinline void wake_q_add(struct wake_q_head *head, struct task_struct *task)
 {
 	if (droid_lkm_ks.wake_q_add)
 		droid_lkm_ks.wake_q_add(head, task);
 }
 
-void wake_q_add_safe(struct wake_q_head *head, struct task_struct *task)
+__nocfi noinline void wake_q_add_safe(struct wake_q_head *head, struct task_struct *task)
 {
 	if (droid_lkm_ks.wake_q_add_safe)
 		droid_lkm_ks.wake_q_add_safe(head, task);
 }
 
-void wake_up_q(struct wake_q_head *head)
+__nocfi noinline void wake_up_q(struct wake_q_head *head)
 {
 	if (droid_lkm_ks.wake_up_q)
 		droid_lkm_ks.wake_up_q(head);
 }
 
-int schedule_hrtimeout_range(ktime_t *expires, u64 delta,
+__nocfi noinline int schedule_hrtimeout_range(ktime_t *expires, u64 delta,
 			     const enum hrtimer_mode mode)
 {
 	if (!droid_lkm_ks.schedule_hrtimeout_range)
@@ -52,35 +52,35 @@ int schedule_hrtimeout_range(ktime_t *expires, u64 delta,
 	return droid_lkm_ks.schedule_hrtimeout_range(expires, delta, mode);
 }
 
-int get_timespec64(struct timespec64 *ts, const struct __kernel_timespec __user *uts)
+__nocfi noinline int get_timespec64(struct timespec64 *ts, const struct __kernel_timespec __user *uts)
 {
 	if (!droid_lkm_ks.get_timespec64)
 		return -ENOSYS;
 	return droid_lkm_ks.get_timespec64(ts, uts);
 }
 
-int get_old_timespec32(struct timespec64 *ts, const void __user *uts)
+__nocfi noinline int get_old_timespec32(struct timespec64 *ts, const void __user *uts)
 {
 	if (!droid_lkm_ks.get_old_timespec32)
 		return -ENOSYS;
 	return droid_lkm_ks.get_old_timespec32(ts, uts);
 }
 
-s64 __percpu_counter_sum(struct percpu_counter *fbc)
+__nocfi noinline s64 __percpu_counter_sum(struct percpu_counter *fbc)
 {
 	if (!droid_lkm_ks.__percpu_counter_sum)
 		return 0;
 	return droid_lkm_ks.__percpu_counter_sum(fbc);
 }
 
-int shmem_lock(struct file *file, int lock, struct ucounts *ucounts)
+__nocfi noinline int shmem_lock(struct file *file, int lock, DROID_LKM_SHMEM_LOCK_PARAM)
 {
 	if (!droid_lkm_ks.shmem_lock)
 		return -ENOSYS;
-	return droid_lkm_ks.shmem_lock(file, lock, ucounts);
+	return droid_lkm_ks.shmem_lock(file, lock, DROID_LKM_SHMEM_LOCK_PASS);
 }
 
-struct file *shmem_kernel_file_setup(const char *name, loff_t size,
+__nocfi noinline struct file *shmem_kernel_file_setup(const char *name, loff_t size,
 				     unsigned long flags)
 {
 	if (!droid_lkm_ks.shmem_kernel_file_setup)
@@ -88,13 +88,13 @@ struct file *shmem_kernel_file_setup(const char *name, loff_t size,
 	return droid_lkm_ks.shmem_kernel_file_setup(name, size, flags);
 }
 
-void shmem_unlock_mapping(struct address_space *mapping)
+__nocfi noinline void shmem_unlock_mapping(struct address_space *mapping)
 {
 	if (droid_lkm_ks.shmem_unlock_mapping)
 		droid_lkm_ks.shmem_unlock_mapping(mapping);
 }
 
-struct file *alloc_file_clone(struct file *base, int flags,
+__nocfi noinline struct file *alloc_file_clone(struct file *base, int flags,
 			      const struct file_operations *fops)
 {
 	if (!droid_lkm_ks.alloc_file_clone)
@@ -102,59 +102,41 @@ struct file *alloc_file_clone(struct file *base, int flags,
 	return droid_lkm_ks.alloc_file_clone(base, flags, fops);
 }
 
-int __mm_populate(unsigned long addr, unsigned long len, int ignore_errors)
+__nocfi noinline int __mm_populate(unsigned long addr, unsigned long len, int ignore_errors)
 {
 	if (!droid_lkm_ks.__mm_populate)
 		return 0;
 	return droid_lkm_ks.__mm_populate(addr, len, ignore_errors);
 }
 
-/*
- * a static kernel symbol that is never address taken carries no KCFI preamble,
- * so an indirect call to it always trips the type check. the 6.6
- * do_vmi_align_munmap is such a symbol while the 6.12 one is not, so this shim
- * opts out of the check. the prototype below matches mm/mmap.c (6.6) and
- * mm/vma.c (6.12).
- */
-__nocfi int do_vmi_align_munmap(struct vma_iterator *vmi,
-				struct vm_area_struct *vma,
-				struct mm_struct *mm, unsigned long start,
-				unsigned long end, struct list_head *uf,
-				bool unlock)
-{
-	if (!droid_lkm_ks.do_vmi_align_munmap)
-		return -ENOSYS;
-	return droid_lkm_ks.do_vmi_align_munmap(vmi, vma, mm, start, end, uf, unlock);
-}
-
-int inode_permission(struct mnt_idmap *idmap, struct inode *inode, int mask)
+__nocfi noinline int inode_permission(DROID_LKM_IDMAP_PARAM struct inode *inode, int mask)
 {
 	if (!droid_lkm_ks.inode_permission)
 		return -ENOSYS;
-	return droid_lkm_ks.inode_permission(idmap, inode, mask);
+	return droid_lkm_ks.inode_permission(DROID_LKM_IDMAP_PASS inode, mask);
 }
 
-int mnt_want_write(struct vfsmount *mnt)
+__nocfi noinline int mnt_want_write(struct vfsmount *mnt)
 {
 	if (!droid_lkm_ks.mnt_want_write)
 		return -ENOSYS;
 	return droid_lkm_ks.mnt_want_write(mnt);
 }
 
-void mnt_drop_write(struct vfsmount *mnt)
+__nocfi noinline void mnt_drop_write(struct vfsmount *mnt)
 {
 	if (droid_lkm_ks.mnt_drop_write)
 		droid_lkm_ks.mnt_drop_write(mnt);
 }
 
-struct dentry *lookup_one_len(const char *name, struct dentry *base, int len)
+__nocfi noinline struct dentry *lookup_one_len(const char *name, struct dentry *base, int len)
 {
 	if (!droid_lkm_ks.lookup_one_len)
 		return ERR_PTR(-ENOSYS);
 	return droid_lkm_ks.lookup_one_len(name, base, len);
 }
 
-int get_tree_nodev(struct fs_context *fc,
+__nocfi noinline int get_tree_nodev(struct fs_context *fc,
 		   int (*fill_super)(struct super_block *sb,
 				     struct fs_context *fc))
 {
@@ -176,61 +158,61 @@ kmem_buckets *kmem_buckets_create(const char *name, slab_flags_t flags,
 
 
 // missing int hooks fall back to 0 as the kernel does without CONFIG_SECURITY
-int security_ipc_permission(struct kern_ipc_perm *ipcp, short flag)
+__nocfi noinline int security_ipc_permission(struct kern_ipc_perm *ipcp, short flag)
 {
 	if (!droid_lkm_ks.security_ipc_permission)
 		return 0;
 	return droid_lkm_ks.security_ipc_permission(ipcp, flag);
 }
 
-int security_mmap_file(struct file *file, unsigned long prot, unsigned long flags)
+__nocfi noinline int security_mmap_file(struct file *file, unsigned long prot, unsigned long flags)
 {
 	if (!droid_lkm_ks.security_mmap_file)
 		return 0;
 	return droid_lkm_ks.security_mmap_file(file, prot, flags);
 }
 
-int security_msg_msg_alloc(struct msg_msg *msg)
+__nocfi noinline int security_msg_msg_alloc(struct msg_msg *msg)
 {
 	if (!droid_lkm_ks.security_msg_msg_alloc)
 		return 0;
 	return droid_lkm_ks.security_msg_msg_alloc(msg);
 }
 
-void security_msg_msg_free(struct msg_msg *msg)
+__nocfi noinline void security_msg_msg_free(struct msg_msg *msg)
 {
 	if (droid_lkm_ks.security_msg_msg_free)
 		droid_lkm_ks.security_msg_msg_free(msg);
 }
 
-int security_msg_queue_alloc(struct kern_ipc_perm *msq)
+__nocfi noinline int security_msg_queue_alloc(struct kern_ipc_perm *msq)
 {
 	if (!droid_lkm_ks.security_msg_queue_alloc)
 		return 0;
 	return droid_lkm_ks.security_msg_queue_alloc(msq);
 }
 
-void security_msg_queue_free(struct kern_ipc_perm *msq)
+__nocfi noinline void security_msg_queue_free(struct kern_ipc_perm *msq)
 {
 	if (droid_lkm_ks.security_msg_queue_free)
 		droid_lkm_ks.security_msg_queue_free(msq);
 }
 
-int security_msg_queue_associate(struct kern_ipc_perm *msq, int msqflg)
+__nocfi noinline int security_msg_queue_associate(struct kern_ipc_perm *msq, int msqflg)
 {
 	if (!droid_lkm_ks.security_msg_queue_associate)
 		return 0;
 	return droid_lkm_ks.security_msg_queue_associate(msq, msqflg);
 }
 
-int security_msg_queue_msgctl(struct kern_ipc_perm *msq, int cmd)
+__nocfi noinline int security_msg_queue_msgctl(struct kern_ipc_perm *msq, int cmd)
 {
 	if (!droid_lkm_ks.security_msg_queue_msgctl)
 		return 0;
 	return droid_lkm_ks.security_msg_queue_msgctl(msq, cmd);
 }
 
-int security_msg_queue_msgsnd(struct kern_ipc_perm *msq, struct msg_msg *msg,
+__nocfi noinline int security_msg_queue_msgsnd(struct kern_ipc_perm *msq, struct msg_msg *msg,
 			      int msqflg)
 {
 	if (!droid_lkm_ks.security_msg_queue_msgsnd)
@@ -238,7 +220,7 @@ int security_msg_queue_msgsnd(struct kern_ipc_perm *msq, struct msg_msg *msg,
 	return droid_lkm_ks.security_msg_queue_msgsnd(msq, msg, msqflg);
 }
 
-int security_msg_queue_msgrcv(struct kern_ipc_perm *msq, struct msg_msg *msg,
+__nocfi noinline int security_msg_queue_msgrcv(struct kern_ipc_perm *msq, struct msg_msg *msg,
 			      struct task_struct *target, long type, int mode)
 {
 	if (!droid_lkm_ks.security_msg_queue_msgrcv)
@@ -246,68 +228,68 @@ int security_msg_queue_msgrcv(struct kern_ipc_perm *msq, struct msg_msg *msg,
 	return droid_lkm_ks.security_msg_queue_msgrcv(msq, msg, target, type, mode);
 }
 
-int security_shm_alloc(struct kern_ipc_perm *shp)
+__nocfi noinline int security_shm_alloc(struct kern_ipc_perm *shp)
 {
 	if (!droid_lkm_ks.security_shm_alloc)
 		return 0;
 	return droid_lkm_ks.security_shm_alloc(shp);
 }
 
-void security_shm_free(struct kern_ipc_perm *shp)
+__nocfi noinline void security_shm_free(struct kern_ipc_perm *shp)
 {
 	if (droid_lkm_ks.security_shm_free)
 		droid_lkm_ks.security_shm_free(shp);
 }
 
-int security_shm_associate(struct kern_ipc_perm *shp, int shmflg)
+__nocfi noinline int security_shm_associate(struct kern_ipc_perm *shp, int shmflg)
 {
 	if (!droid_lkm_ks.security_shm_associate)
 		return 0;
 	return droid_lkm_ks.security_shm_associate(shp, shmflg);
 }
 
-int security_shm_shmctl(struct kern_ipc_perm *shp, int cmd)
+__nocfi noinline int security_shm_shmctl(struct kern_ipc_perm *shp, int cmd)
 {
 	if (!droid_lkm_ks.security_shm_shmctl)
 		return 0;
 	return droid_lkm_ks.security_shm_shmctl(shp, cmd);
 }
 
-int security_shm_shmat(struct kern_ipc_perm *shp, char __user *shmaddr, int shmflg)
+__nocfi noinline int security_shm_shmat(struct kern_ipc_perm *shp, char __user *shmaddr, int shmflg)
 {
 	if (!droid_lkm_ks.security_shm_shmat)
 		return 0;
 	return droid_lkm_ks.security_shm_shmat(shp, shmaddr, shmflg);
 }
 
-int security_sem_alloc(struct kern_ipc_perm *sma)
+__nocfi noinline int security_sem_alloc(struct kern_ipc_perm *sma)
 {
 	if (!droid_lkm_ks.security_sem_alloc)
 		return 0;
 	return droid_lkm_ks.security_sem_alloc(sma);
 }
 
-void security_sem_free(struct kern_ipc_perm *sma)
+__nocfi noinline void security_sem_free(struct kern_ipc_perm *sma)
 {
 	if (droid_lkm_ks.security_sem_free)
 		droid_lkm_ks.security_sem_free(sma);
 }
 
-int security_sem_associate(struct kern_ipc_perm *sma, int semflg)
+__nocfi noinline int security_sem_associate(struct kern_ipc_perm *sma, int semflg)
 {
 	if (!droid_lkm_ks.security_sem_associate)
 		return 0;
 	return droid_lkm_ks.security_sem_associate(sma, semflg);
 }
 
-int security_sem_semctl(struct kern_ipc_perm *sma, int cmd)
+__nocfi noinline int security_sem_semctl(struct kern_ipc_perm *sma, int cmd)
 {
 	if (!droid_lkm_ks.security_sem_semctl)
 		return 0;
 	return droid_lkm_ks.security_sem_semctl(sma, cmd);
 }
 
-int security_sem_semop(struct kern_ipc_perm *sma, struct sembuf *sops, unsigned nsops,
+__nocfi noinline int security_sem_semop(struct kern_ipc_perm *sma, struct sembuf *sops, unsigned nsops,
 		       int alter)
 {
 	if (!droid_lkm_ks.security_sem_semop)
@@ -315,39 +297,39 @@ int security_sem_semop(struct kern_ipc_perm *sma, struct sembuf *sops, unsigned 
 	return droid_lkm_ks.security_sem_semop(sma, sops, nsops, alter);
 }
 
-void __audit_ipc_obj(struct kern_ipc_perm *ipcp)
+__nocfi noinline void __audit_ipc_obj(struct kern_ipc_perm *ipcp)
 {
 	if (droid_lkm_ks.__audit_ipc_obj)
 		droid_lkm_ks.__audit_ipc_obj(ipcp);
 }
 
-void __audit_ipc_set_perm(unsigned long qbytes, uid_t uid, gid_t gid,
+__nocfi noinline void __audit_ipc_set_perm(unsigned long qbytes, uid_t uid, gid_t gid,
 			  umode_t mode)
 {
 	if (droid_lkm_ks.__audit_ipc_set_perm)
 		droid_lkm_ks.__audit_ipc_set_perm(qbytes, uid, gid, mode);
 }
 
-void __audit_inode(struct filename *name, const struct dentry *dentry,
+__nocfi noinline void __audit_inode(struct filename *name, const struct dentry *dentry,
 		   unsigned int aflags)
 {
 	if (droid_lkm_ks.__audit_inode)
 		droid_lkm_ks.__audit_inode(name, dentry, aflags);
 }
 
-void __audit_file(const struct file *file)
+__nocfi noinline void __audit_file(const struct file *file)
 {
 	if (droid_lkm_ks.__audit_file)
 		droid_lkm_ks.__audit_file(file);
 }
 
-void __audit_mq_open(int oflag, umode_t mode, struct mq_attr *attr)
+__nocfi noinline void __audit_mq_open(int oflag, umode_t mode, struct mq_attr *attr)
 {
 	if (droid_lkm_ks.__audit_mq_open)
 		droid_lkm_ks.__audit_mq_open(oflag, mode, attr);
 }
 
-void __audit_mq_sendrecv(mqd_t mqdes, size_t msg_len, unsigned int msg_prio,
+__nocfi noinline void __audit_mq_sendrecv(mqd_t mqdes, size_t msg_len, unsigned int msg_prio,
 			 const struct timespec64 *abs_timeout)
 {
 	if (droid_lkm_ks.__audit_mq_sendrecv)
@@ -355,13 +337,13 @@ void __audit_mq_sendrecv(mqd_t mqdes, size_t msg_len, unsigned int msg_prio,
 						 abs_timeout);
 }
 
-void __audit_mq_notify(mqd_t mqdes, const struct sigevent *notification)
+__nocfi noinline void __audit_mq_notify(mqd_t mqdes, const struct sigevent *notification)
 {
 	if (droid_lkm_ks.__audit_mq_notify)
 		droid_lkm_ks.__audit_mq_notify(mqdes, notification);
 }
 
-void __audit_mq_getsetattr(mqd_t mqdes, struct mq_attr *mqstat)
+__nocfi noinline void __audit_mq_getsetattr(mqd_t mqdes, struct mq_attr *mqstat)
 {
 	if (droid_lkm_ks.__audit_mq_getsetattr)
 		droid_lkm_ks.__audit_mq_getsetattr(mqdes, mqstat);

@@ -11,6 +11,7 @@
 #include "core.h"
 #include "hk.h"
 #include "ds.h"
+#include "ds_caps.h"
 #include "ds_ipcns.h"
 #include "ds_ksym.h"
 #include "ds_pidns.h"
@@ -99,6 +100,15 @@ static int __init droid_lkm_init(void)
 	droid_lkm_probe_symbols();
 
 	ret = droid_lkm_ksym_init();
+	if (ret)
+		return ret;
+
+	ret = droid_lkm_caps_init();
+	if (ret)
+		return ret;
+	droid_lkm_caps_report();
+
+	ret = droid_lkm_munmap_init();
 	if (ret)
 		return ret;
 

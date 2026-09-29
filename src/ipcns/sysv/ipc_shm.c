@@ -53,6 +53,62 @@
 
 #include "ipc_util.h"
 
+/*
+ * SHM_LOCK accounts RLIMIT_MEMLOCK against the caller, and the object it uses
+ * changed shape twice: it is the user_struct of the caller up to 5.10 and the
+ * caller's ucounts from 5.15 on, with the field in struct shmid_kernel named
+ * after it. everything that follows from that object is folded in this one
+ * block: its type, the field, the accessor, the arity of hugetlb_file_setup()
+ * (which took the object as a fourth argument up to 6.0) and the presence of
+ * vm_operations_struct::may_split, which 5.10 does not have.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+#define DROID_LKM_SHM_MLOCK_TYPE	struct ucounts
+#define DROID_LKM_SHM_MLOCK_FIELD	struct ucounts *mlock_ucounts
+#define DROID_LKM_SHM_MLOCK(_shp)	((_shp)->mlock_ucounts)
+#define DROID_LKM_SHM_MLOCK_CUR()	current_ucounts()
+#else
+#define DROID_LKM_SHM_MLOCK_TYPE	struct user_struct
+#define DROID_LKM_SHM_MLOCK_FIELD	struct user_struct *mlock_user
+#define DROID_LKM_SHM_MLOCK(_shp)	((_shp)->mlock_user)
+#define DROID_LKM_SHM_MLOCK_CUR()	current_user()
+#endif
+
+static inline struct file *droid_lkm_shm_hugetlb_file_setup(const char *name,
+							    size_t size,
+							    vm_flags_t acct,
+							    DROID_LKM_SHM_MLOCK_TYPE **acctp,
+							    int creat_flags,
+							    int page_size_log)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	return hugetlb_file_setup(name, size, acct, creat_flags, page_size_log);
+#else
+	return hugetlb_file_setup(name, size, acct, acctp, creat_flags,
+				  page_size_log);
+#endif
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+#define DROID_LKM_SHM_MAY_SPLIT	.may_split = shm_may_split,
+
+static inline int droid_lkm_shm_vm_may_split(const struct vm_operations_struct *ops,
+					     struct vm_area_struct *vma,
+					     unsigned long addr)
+{
+	return ops->may_split ? ops->may_split(vma, addr) : 0;
+}
+#else
+#define DROID_LKM_SHM_MAY_SPLIT
+
+static inline int droid_lkm_shm_vm_may_split(const struct vm_operations_struct *ops,
+					     struct vm_area_struct *vma,
+					     unsigned long addr)
+{
+	return 0;
+}
+#endif
+
 struct shmid_kernel /* private to the kernel */
 {
 	struct kern_ipc_perm	shm_perm;
@@ -64,7 +120,7 @@ struct shmid_kernel /* private to the kernel */
 	time64_t		shm_ctim;
 	struct pid		*shm_cprid;
 	struct pid		*shm_lprid;
-	struct ucounts		*mlock_ucounts;
+	DROID_LKM_SHM_MLOCK_FIELD;
 
 	/*
 	 * The task created the shm object, for
@@ -331,7 +387,7 @@ static void shm_destroy(struct ipc_namespace *ns, struct shmid_kernel *shp)
 	shm_rmid(shp);
 	shm_unlock(shp);
 	if (!is_file_hugepages(shm_file))
-		shmem_lock(shm_file, 0, shp->mlock_ucounts);
+		shmem_lock(shm_file, 0, DROID_LKM_SHM_MLOCK(shp));
 	fput(shm_file);
 	ipc_update_pid(&shp->shm_cprid, NULL);
 	ipc_update_pid(&shp->shm_lprid, NULL);
@@ -540,13 +596,9 @@ static vm_fault_t shm_fault(struct vm_fault *vmf)
 
 static int shm_may_split(struct vm_area_struct *vma, unsigned long addr)
 {
-	struct file *file = vma->vm_file;
-	struct shm_file_data *sfd = shm_file_data(file);
+	struct shm_file_data *sfd = shm_file_data(vma->vm_file);
 
-	if (sfd->vm_ops->may_split)
-		return sfd->vm_ops->may_split(vma, addr);
-
-	return 0;
+	return droid_lkm_shm_vm_may_split(sfd->vm_ops, vma, addr);
 }
 
 static unsigned long shm_pagesize(struct vm_area_struct *vma)
@@ -677,7 +729,7 @@ static const struct vm_operations_struct shm_vm_ops = {
 	.open	= shm_open,	/* callback for a new vm-area open */
 	.close	= shm_close,	/* callback for when the vm-area is released */
 	.fault	= shm_fault,
-	.may_split = shm_may_split,
+	DROID_LKM_SHM_MAY_SPLIT
 	.pagesize = shm_pagesize,
 #if defined(CONFIG_NUMA)
 	.set_policy = shm_set_policy,
@@ -720,7 +772,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 
 	shp->shm_perm.key = key;
 	shp->shm_perm.mode = (shmflg & S_IRWXUGO);
-	shp->mlock_ucounts = NULL;
+	DROID_LKM_SHM_MLOCK(shp) = NULL;
 
 	shp->shm_perm.security = NULL;
 	error = security_shm_alloc(&shp->shm_perm);
@@ -744,8 +796,10 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 		/* hugetlb_file_setup applies strict accounting */
 		if (shmflg & SHM_NORESERVE)
 			acctflag = VM_NORESERVE;
-		file = hugetlb_file_setup(name, hugesize, acctflag,
-				HUGETLB_SHMFS_INODE, (shmflg >> SHM_HUGE_SHIFT) & SHM_HUGE_MASK);
+		file = droid_lkm_shm_hugetlb_file_setup(name, hugesize, acctflag,
+							&DROID_LKM_SHM_MLOCK(shp),
+							HUGETLB_SHMFS_INODE,
+							(shmflg >> SHM_HUGE_SHIFT) & SHM_HUGE_MASK);
 	} else {
 		/*
 		 * Do not allow no accounting for OVERCOMMIT_NEVER, even
@@ -1200,12 +1254,12 @@ static int shmctl_do_lock(struct ipc_namespace *ns, int shmid, int cmd)
 		goto out_unlock0;
 
 	if (cmd == SHM_LOCK) {
-		struct ucounts *ucounts = current_ucounts();
+		DROID_LKM_SHM_MLOCK_TYPE *acct = DROID_LKM_SHM_MLOCK_CUR();
 
-		err = shmem_lock(shm_file, 1, ucounts);
+		err = shmem_lock(shm_file, 1, acct);
 		if (!err && !(shp->shm_perm.mode & SHM_LOCKED)) {
 			shp->shm_perm.mode |= SHM_LOCKED;
-			shp->mlock_ucounts = ucounts;
+			DROID_LKM_SHM_MLOCK(shp) = acct;
 		}
 		goto out_unlock0;
 	}
@@ -1213,9 +1267,9 @@ static int shmctl_do_lock(struct ipc_namespace *ns, int shmid, int cmd)
 	/* SHM_UNLOCK */
 	if (!(shp->shm_perm.mode & SHM_LOCKED))
 		goto out_unlock0;
-	shmem_lock(shm_file, 0, shp->mlock_ucounts);
+	shmem_lock(shm_file, 0, DROID_LKM_SHM_MLOCK(shp));
 	shp->shm_perm.mode &= ~SHM_LOCKED;
-	shp->mlock_ucounts = NULL;
+	DROID_LKM_SHM_MLOCK(shp) = NULL;
 	get_file(shm_file);
 	ipc_unlock_object(&shp->shm_perm);
 	rcu_read_unlock();
@@ -1726,7 +1780,6 @@ long ksys_shmdt(char __user *shmaddr)
 #ifdef CONFIG_MMU
 	loff_t size = 0;
 	struct file *file;
-	VMA_ITERATOR(vmi, mm, addr);
 #endif
 
 	if (addr & ~PAGE_MASK)
@@ -1758,7 +1811,7 @@ long ksys_shmdt(char __user *shmaddr)
 	 */
 
 #ifdef CONFIG_MMU
-	for_each_vma(vmi, vma) {
+	for (vma = find_vma(mm, addr); vma; vma = find_vma(mm, vma->vm_end)) {
 		/*
 		 * Check if the starting address would match, i.e. it's
 		 * a fragment created by mprotect() and/or munmap(), or it
@@ -1775,8 +1828,8 @@ long ksys_shmdt(char __user *shmaddr)
 			 */
 			file = vma->vm_file;
 			size = i_size_read(file_inode(vma->vm_file));
-			do_vmi_align_munmap(&vmi, vma, mm, vma->vm_start,
-					    vma->vm_end, NULL, false);
+			droid_lkm_munmap_locked(mm, vma->vm_start, vma->vm_end,
+						NULL);
 			/*
 			 * We discovered the size of the shm segment, so
 			 * break out of here and fall through to the next
@@ -1784,7 +1837,7 @@ long ksys_shmdt(char __user *shmaddr)
 			 * searching for matching vma's.
 			 */
 			retval = 0;
-			vma = vma_next(&vmi);
+			vma = find_vma(mm, vma->vm_end);
 			break;
 		}
 	}
@@ -1796,15 +1849,16 @@ long ksys_shmdt(char __user *shmaddr)
 	 */
 	size = PAGE_ALIGN(size);
 	while (vma && (loff_t)(vma->vm_end - addr) <= size) {
+		unsigned long vend = vma->vm_end;
+
 		/* finding a matching vma now does not alter retval */
 		if ((vma->vm_ops == &shm_vm_ops) &&
 		    ((vma->vm_start - addr)/PAGE_SIZE == vma->vm_pgoff) &&
 		    (vma->vm_file == file)) {
-			do_vmi_align_munmap(&vmi, vma, mm, vma->vm_start,
-					    vma->vm_end, NULL, false);
+			droid_lkm_munmap_locked(mm, vma->vm_start, vend, NULL);
 		}
 
-		vma = vma_next(&vmi);
+		vma = find_vma(mm, vend);
 	}
 
 #else	/* CONFIG_MMU */

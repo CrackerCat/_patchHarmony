@@ -17,6 +17,10 @@
 
 struct file;
 struct list_head;
+int droid_lkm_munmap_locked(struct mm_struct *mm, unsigned long start,
+			    unsigned long end, struct list_head *uf);
+int droid_lkm_munmap_init(void);
+
 unsigned long droid_lkm_do_mmap(struct file *file, unsigned long addr,
 			 unsigned long len, unsigned long prot,
 			 unsigned long flags, unsigned long vm_flags,

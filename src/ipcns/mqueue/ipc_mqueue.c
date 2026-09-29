@@ -44,6 +44,7 @@
 
 #include <net/sock.h>
 #include "ds.h"
+#include "ds_caps.h"
 #include "ds_compat.h"
 #include "ds_ipc_compat.h"
 #include "ds_ipcns.h"
@@ -296,7 +297,7 @@ try_again:
 	return msg;
 }
 
-static struct inode *mqueue_get_inode(struct super_block *sb,
+static __nocfi noinline struct inode *mqueue_get_inode(struct super_block *sb,
 		struct ipc_namespace *ipc_ns, umode_t mode,
 		struct mq_attr *attr)
 {
@@ -311,7 +312,7 @@ static struct inode *mqueue_get_inode(struct super_block *sb,
 	inode->i_mode = mode;
 	inode->i_uid = current_fsuid();
 	inode->i_gid = current_fsgid();
-	simple_inode_init_ts(inode);
+	droid_lkm_mq_inode_init_ts(inode);
 
 	if (S_ISREG(mode)) {
 		struct mqueue_inode_info *info;
@@ -378,14 +379,14 @@ static struct inode *mqueue_get_inode(struct super_block *sb,
 		if (mq_bytes + mq_treesize < mq_bytes)
 			goto out_inode;
 		mq_bytes += mq_treesize;
-		info->ucounts = get_ucounts(current_ucounts());
+		info->ucounts = droid_lkm_mq_ucounts_get();
 		if (info->ucounts) {
 			long msgqueue;
 
 			spin_lock(&mq_lock);
-			msgqueue = inc_rlimit_ucounts(info->ucounts, UCOUNT_RLIMIT_MSGQUEUE, mq_bytes);
+			msgqueue = droid_lkm_mq_ucounts_charge(info->ucounts, mq_bytes);
 			if (msgqueue == LONG_MAX || msgqueue > rlimit(RLIMIT_MSGQUEUE)) {
-				dec_rlimit_ucounts(info->ucounts, UCOUNT_RLIMIT_MSGQUEUE, mq_bytes);
+				droid_lkm_mq_ucounts_uncharge(info->ucounts, mq_bytes);
 				spin_unlock(&mq_lock);
 				put_ucounts(info->ucounts);
 				info->ucounts = NULL;
@@ -432,7 +433,7 @@ static int mqueue_fill_super(struct super_block *sb, struct fs_context *fc)
 	return 0;
 }
 
-static int mqueue_get_tree(struct fs_context *fc)
+static __nocfi noinline int mqueue_get_tree(struct fs_context *fc)
 {
 	struct mqueue_fs_context *ctx = fc->fs_private;
 
@@ -474,7 +475,7 @@ static int mqueue_init_fs_context(struct fs_context *fc)
 /*
  * So the ns parameter is always a newly created ipc namespace.
  */
-static struct vfsmount *mq_create_mount(struct ipc_namespace *ns)
+static __nocfi noinline struct vfsmount *mq_create_mount(struct ipc_namespace *ns)
 {
 	struct mqueue_fs_context *ctx;
 	struct fs_context *fc;
@@ -507,7 +508,7 @@ static struct inode *mqueue_alloc_inode(struct super_block *sb)
 {
 	struct mqueue_inode_info *ei;
 
-	ei = alloc_inode_sb(sb, mqueue_inode_cachep, GFP_KERNEL);
+	ei = droid_lkm_mq_alloc_inode(sb, mqueue_inode_cachep);
 	if (!ei)
 		return NULL;
 	return &ei->vfs_inode;
@@ -555,7 +556,7 @@ static void mqueue_evict_inode(struct inode *inode)
 					  info->attr.mq_msgsize);
 
 		spin_lock(&mq_lock);
-		dec_rlimit_ucounts(info->ucounts, UCOUNT_RLIMIT_MSGQUEUE, mq_bytes);
+		droid_lkm_mq_ucounts_uncharge(info->ucounts, mq_bytes);
 		/*
 		 * get_ns_from_inode() ensures that the
 		 * (ipc_ns = sb->s_fs_info) is either a valid ipc_ns
@@ -609,7 +610,7 @@ static int mqueue_create_attr(struct dentry *dentry, umode_t mode, void *arg)
 
 	put_ipc_ns(ipc_ns);
 	dir->i_size += DIRENT_SIZE;
-	simple_inode_init_ts(dir);
+	droid_lkm_mq_inode_init_ts(dir);
 
 	d_instantiate(dentry, inode);
 	dget(dentry);
@@ -621,7 +622,7 @@ out_unlock:
 	return error;
 }
 
-static int mqueue_create(struct mnt_idmap *idmap, struct inode *dir,
+static int mqueue_create(DROID_LKM_MQ_IDMAP_ARG struct inode *dir,
 			 struct dentry *dentry, umode_t mode, bool excl)
 {
 	return mqueue_create_attr(dentry, mode, NULL);
@@ -631,7 +632,7 @@ static int mqueue_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct inode *inode = d_inode(dentry);
 
-	simple_inode_init_ts(dir);
+	droid_lkm_mq_inode_init_ts(dir);
 	dir->i_size -= DIRENT_SIZE;
 	drop_nlink(inode);
 	dput(dentry);
@@ -670,7 +671,7 @@ static ssize_t mqueue_read_file(struct file *filp, char __user *u_data,
 	if (ret <= 0)
 		return ret;
 
-	inode_set_atime_to_ts(inode, inode_set_ctime_current(inode));
+	droid_lkm_mq_inode_touch(inode);
 	return ret;
 }
 
@@ -724,7 +725,7 @@ static void wq_add(struct mqueue_inode_info *info, int sr,
  * lock isn't held.
  * sr: SEND or RECV
  */
-static int wq_sleep(struct mqueue_inode_info *info, int sr,
+static __nocfi noinline int wq_sleep(struct mqueue_inode_info *info, int sr,
 		    ktime_t *timeout, struct ext_wait_queue *ewp)
 	__releases(&info->lock)
 {
@@ -793,7 +794,7 @@ static inline void set_cookie(struct sk_buff *skb, char code)
 /*
  * The next function is only to split too long sys_mq_timedsend
  */
-static void __do_notify(struct mqueue_inode_info *info)
+static __nocfi noinline void __do_notify(struct mqueue_inode_info *info)
 {
 	/* notification
 	 * invoked when there is registered process and there isn't process
@@ -864,7 +865,7 @@ static int prepare_timeout(const struct __kernel_timespec __user *u_abs_timeout,
 	return 0;
 }
 
-static void remove_notification(struct mqueue_inode_info *info)
+static __nocfi noinline void remove_notification(struct mqueue_inode_info *info)
 {
 	if (info->notify_owner != NULL &&
 	    info->notify.sigev_notify == SIGEV_THREAD) {
@@ -877,7 +878,7 @@ static void remove_notification(struct mqueue_inode_info *info)
 	info->notify_user_ns = NULL;
 }
 
-static int prepare_open(struct dentry *dentry, int oflag, int ro,
+static __nocfi noinline int prepare_open(struct dentry *dentry, int oflag, int ro,
 			umode_t mode, struct filename *name,
 			struct mq_attr *attr)
 {
@@ -901,10 +902,10 @@ static int prepare_open(struct dentry *dentry, int oflag, int ro,
 	if ((oflag & O_ACCMODE) == (O_RDWR | O_WRONLY))
 		return -EINVAL;
 	acc = oflag2acc[oflag & O_ACCMODE];
-	return inode_permission(&nop_mnt_idmap, d_inode(dentry), acc);
+	return droid_lkm_mq_inode_permission(dentry, acc);
 }
 
-static int do_mq_open(const char __user *u_name, int oflag, umode_t mode,
+static __nocfi noinline int do_mq_open(const char __user *u_name, int oflag, umode_t mode,
 		      struct mq_attr *attr)
 {
 	struct vfsmount *mnt = current->nsproxy->ipc_ns->mq_mnt;
@@ -959,6 +960,18 @@ out_putname:
 	return fd;
 }
 
+/*
+ * SYSCALL_DEFINE* puts the body in an inner function, so a __nocfi on the outer
+ * entry point does not reach the resolved kernel helper the body calls, and old
+ * CFI (5.10 and 5.15) traps on the first one. the attribute region covers every
+ * function defined in it, the syscall entries and their bodies alike.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#pragma clang attribute push(__attribute__((no_sanitize("kcfi"))), apply_to = function)
+#else
+#pragma clang attribute push(__attribute__((no_sanitize("cfi"))), apply_to = function)
+#endif
+
 SYSCALL_DEFINE4(mq_open, const char __user *, u_name, int, oflag, umode_t, mode,
 		struct mq_attr __user *, u_attr)
 {
@@ -969,7 +982,7 @@ SYSCALL_DEFINE4(mq_open, const char __user *, u_name, int, oflag, umode_t, mode,
 	return do_mq_open(u_name, oflag, mode, u_attr ? &attr : NULL);
 }
 
-SYSCALL_DEFINE1(mq_unlink, const char __user *, u_name)
+__nocfi noinline SYSCALL_DEFINE1(mq_unlink, const char __user *, u_name)
 {
 	int err;
 	struct filename *name;
@@ -999,8 +1012,7 @@ SYSCALL_DEFINE1(mq_unlink, const char __user *, u_name)
 		err = -ENOENT;
 	} else {
 		ihold(inode);
-		err = vfs_unlink(&nop_mnt_idmap, d_inode(dentry->d_parent),
-				 dentry, NULL);
+		err = droid_lkm_mq_vfs_unlink(dentry);
 	}
 	dput(dentry);
 
@@ -1182,7 +1194,7 @@ static int do_mq_timedsend(mqd_t mqdes, const char __user *u_msg_ptr,
 				goto out_unlock;
 			__do_notify(info);
 		}
-		simple_inode_init_ts(inode);
+		droid_lkm_mq_inode_init_ts(inode);
 	}
 out_unlock:
 	spin_unlock(&info->lock);
@@ -1276,7 +1288,7 @@ static int do_mq_timedreceive(mqd_t mqdes, char __user *u_msg_ptr,
 
 		msg_ptr = msg_get(info);
 
-		simple_inode_init_ts(inode);
+		droid_lkm_mq_inode_init_ts(inode);
 
 		/* There is now free space in queue. */
 		pipelined_receive(&wake_q, info);
@@ -1332,7 +1344,7 @@ SYSCALL_DEFINE5(mq_timedreceive, mqd_t, mqdes, char __user *, u_msg_ptr,
  * and he isn't currently owner of notification, will be silently discarded.
  * It isn't explicitly defined in the POSIX.
  */
-static int do_mq_notify(mqd_t mqdes, const struct sigevent *notification)
+static __nocfi noinline int do_mq_notify(mqd_t mqdes, const struct sigevent *notification)
 {
 	int ret;
 	struct fd f;
@@ -1413,8 +1425,7 @@ retry:
 	if (notification == NULL) {
 		if (info->notify_owner == task_tgid(current)) {
 			remove_notification(info);
-			inode_set_atime_to_ts(inode,
-					      inode_set_ctime_current(inode));
+			droid_lkm_mq_inode_touch(inode);
 		}
 	} else if (info->notify_owner != NULL) {
 		ret = -EBUSY;
@@ -1440,7 +1451,7 @@ retry:
 
 		info->notify_owner = get_pid(task_tgid(current));
 		info->notify_user_ns = get_user_ns(current_user_ns());
-		inode_set_atime_to_ts(inode, inode_set_ctime_current(inode));
+		droid_lkm_mq_inode_touch(inode);
 	}
 	spin_unlock(&info->lock);
 out_fput:
@@ -1503,7 +1514,7 @@ static int do_mq_getsetattr(int mqdes, struct mq_attr *new, struct mq_attr *old)
 			droid_lkm_fd_file(f)->f_flags &= ~O_NONBLOCK;
 		spin_unlock(&droid_lkm_fd_file(f)->f_lock);
 
-		inode_set_atime_to_ts(inode, inode_set_ctime_current(inode));
+		droid_lkm_mq_inode_touch(inode);
 	}
 
 	spin_unlock(&info->lock);
@@ -1590,7 +1601,7 @@ COMPAT_SYSCALL_DEFINE4(mq_open, const char __user *, u_name,
 	return do_mq_open(u_name, oflag, mode, p);
 }
 
-COMPAT_SYSCALL_DEFINE2(mq_notify, mqd_t, mqdes,
+__nocfi noinline COMPAT_SYSCALL_DEFINE2(mq_notify, mqd_t, mqdes,
 		       const struct compat_sigevent __user *, u_notification)
 {
 	struct sigevent n, *p = NULL;
@@ -1704,6 +1715,8 @@ static struct file_system_type mqueue_fs_type = {
 	.fs_flags		= FS_USERNS_MOUNT,
 };
 
+#pragma clang attribute pop
+
 int droid_lkm_mq_init_ns(struct ipc_namespace *ns)
 {
 	struct vfsmount *m;
@@ -1741,7 +1754,7 @@ int __init droid_lkm_mqueue_fs_init(void)
 	if (mqueue_inode_cachep == NULL)
 		return -ENOMEM;
 
-	if (!droid_lkm_setup_mq_sysctls(&init_ipc_ns)) {
+	if (!droid_lkm_setup_mq_sysctls(droid_lkm_ipcns_host_ns())) {
 		pr_warn("sysctl registration failed\n");
 		error = -ENOMEM;
 		goto out_kmem;
@@ -1753,7 +1766,7 @@ int __init droid_lkm_mqueue_fs_init(void)
 
 	spin_lock_init(&mq_lock);
 
-	error = droid_lkm_mq_init_ns(&init_ipc_ns);
+	error = droid_lkm_mq_init_ns(droid_lkm_ipcns_host_ns());
 	if (error)
 		goto out_filesystem;
 
@@ -1762,7 +1775,7 @@ int __init droid_lkm_mqueue_fs_init(void)
 out_filesystem:
 	unregister_filesystem(&mqueue_fs_type);
 out_sysctl:
-	droid_lkm_retire_mq_sysctls(&init_ipc_ns);
+	droid_lkm_retire_mq_sysctls(droid_lkm_ipcns_host_ns());
 out_kmem:
 	kmem_cache_destroy(mqueue_inode_cachep);
 	return error;
@@ -1772,7 +1785,7 @@ out_kmem:
 
 void droid_lkm_mqueue_fs_exit(void)
 {
-	droid_lkm_retire_mq_sysctls(&init_ipc_ns);
+	droid_lkm_retire_mq_sysctls(droid_lkm_ipcns_host_ns());
 	unregister_filesystem(&mqueue_fs_type);
 	kmem_cache_destroy(mqueue_inode_cachep);
 }

@@ -40,7 +40,7 @@ static const struct proc_ns_operations *droid_lkm_host_pid_ops;
 static const struct proc_ns_operations *droid_lkm_host_pidfc_ops;
 static const struct proc_ns_operations *droid_lkm_host_ipc_ops;
 
-static struct dentry *droid_lkm_ns_instantiate(struct dentry *dentry,
+static __nocfi noinline struct dentry *droid_lkm_ns_instantiate(struct dentry *dentry,
 					struct task_struct *task,
 					const struct proc_ns_operations *ops)
 {
@@ -157,7 +157,7 @@ static struct dentry *droid_lkm_ns_kind_lookup(struct dentry *dentry,
 	return droid_lkm_ns_instantiate(dentry, task, ops);
 }
 
-static struct dentry *droid_lkm_ns_lookup(struct inode *dir, struct dentry *dentry,
+static __nocfi noinline struct dentry *droid_lkm_ns_lookup(struct inode *dir, struct dentry *dentry,
 				   unsigned int flags)
 {
 	enum droid_lkm_ns_kind kind;
@@ -303,11 +303,19 @@ int droid_lkm_proc_init(void)
 		return -EBUSY;
 	}
 	droid_lkm_dbg("ns hook is permanent: module pinned (rmmod -> -EBUSY)\n");
+
+	/*
+	 * ns_last_pid needs the sysctl helpers the ipc side resolves, and this
+	 * runs after droid_lkm_ipcns_init()
+	 */
+	droid_lkm_pidns_sysctl_init();
 	return 0;
 }
 
 void droid_lkm_proc_exit(void)
 {
+	droid_lkm_pidns_sysctl_exit();
+
 	if (droid_lkm_ns_dir_iops && droid_lkm_orig_ns_lookup) {
 		hk_patch_write(&droid_lkm_ns_dir_iops->lookup,
 			       (unsigned long)droid_lkm_orig_ns_lookup);

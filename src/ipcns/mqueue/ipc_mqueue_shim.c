@@ -7,10 +7,178 @@
 #include <linux/module.h>
 #include <linux/statfs.h>
 #include <linux/kernel.h>
+#include <linux/version.h>
+#include <linux/cred.h>
+#include <linux/fs.h>
+#include <linux/fs_context.h>
+#include <linux/mount.h>
+#include <linux/namei.h>
+#include <linux/path.h>
+#include <linux/dcache.h>
+#include <linux/sched/signal.h>
+#include <linux/kprobes.h>
+#include <linux/sysctl.h>
+#include <linux/rwsem.h>
+#include <linux/radix-tree.h>
+#include <linux/pid.h>
+#include <linux/ipc_namespace.h>
 
 #include "ds.h"
 #include "ds_ksym.h"
+#include "ipc_util.h"
 #include "ipc_mqueue_compat.h"
+
+/*
+ * kernel helpers that a stock GKI image may not export. defining the kernel
+ * name here satisfies every reference in the module, including an inline in a
+ * kernel header and an address taken for a sysctl handler, and the thunk inside
+ * refuses the feature instead of leaving the load with an unresolved symbol.
+ */
+__nocfi noinline struct file *dentry_open(const struct path *path, int flags,
+			 const struct cred *cred)
+{
+	if (!droid_lkm_ks.dentry_open)
+		return ERR_PTR(-ENOSYS);
+	return droid_lkm_ks.dentry_open(path, flags, cred);
+}
+
+__nocfi noinline int do_send_sig_info(int sig, struct kernel_siginfo *info, struct task_struct *p,
+		     enum pid_type type)
+{
+	if (!droid_lkm_ks.do_send_sig_info)
+		return -ENOSYS;
+	return droid_lkm_ks.do_send_sig_info(sig, info, p, type);
+}
+
+__nocfi noinline struct vfsmount *fc_mount(struct fs_context *fc)
+{
+	if (!droid_lkm_ks.fc_mount)
+		return ERR_PTR(-ENOSYS);
+	return droid_lkm_ks.fc_mount(fc);
+}
+
+__nocfi noinline struct vfsmount *mntget(struct vfsmount *mnt)
+{
+	/*
+	 * without the symbol no reference can be taken. the mqueue shim refuses
+	 * to enable mqueue in that case, so this only keeps the load working
+	 */
+	if (!droid_lkm_ks.mntget)
+		return mnt;
+	return droid_lkm_ks.mntget(mnt);
+}
+
+__nocfi noinline void put_fs_context(struct fs_context *fc)
+{
+	if (droid_lkm_ks.put_fs_context)
+		droid_lkm_ks.put_fs_context(fc);
+}
+
+__nocfi noinline void free_ipcs(struct ipc_namespace *ns, struct ipc_ids *ids,
+	       void (*free)(struct ipc_namespace *ns, struct kern_ipc_perm *ipcp))
+{
+	if (droid_lkm_ks.free_ipcs)
+		droid_lkm_ks.free_ipcs(ns, ids, free);
+}
+
+#ifdef CONFIG_IPC_NS
+/* only a kernel with ipc namespaces declares this out of line */
+__nocfi noinline void put_ipc_ns(struct ipc_namespace *ns)
+{
+	if (droid_lkm_ks.put_ipc_ns)
+		droid_lkm_ks.put_ipc_ns(ns);
+}
+#endif
+
+__nocfi noinline pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
+{
+	if (!droid_lkm_ks.pid_nr_ns)
+		return 0;
+	return droid_lkm_ks.pid_nr_ns(pid, ns);
+}
+
+__nocfi noinline pid_t pid_vnr(struct pid *pid)
+{
+	if (!droid_lkm_ks.pid_vnr)
+		return 0;
+	return droid_lkm_ks.pid_vnr(pid);
+}
+
+__nocfi noinline int proc_dointvec_minmax(DROID_LKM_CTL_TABLE *table, int write, void *buffer,
+			 size_t *lenp, loff_t *ppos)
+{
+	if (!droid_lkm_ks.proc_dointvec_minmax)
+		return -ENOSYS;
+	return droid_lkm_ks.proc_dointvec_minmax(table, write, buffer, lenp,
+						 ppos);
+}
+
+__nocfi noinline int register_kprobe(struct kprobe *p)
+{
+	if (!droid_lkm_ks.register_kprobe)
+		return -ENOSYS;
+	return droid_lkm_ks.register_kprobe(p);
+}
+
+__nocfi noinline void unregister_kprobe(struct kprobe *p)
+{
+	if (droid_lkm_ks.unregister_kprobe)
+		droid_lkm_ks.unregister_kprobe(p);
+}
+
+__nocfi noinline int kern_path(const char *name, unsigned int flags, struct path *path)
+{
+	if (!droid_lkm_ks.kern_path)
+		return -ENOSYS;
+	return droid_lkm_ks.kern_path(name, flags, path);
+}
+
+__nocfi noinline void path_put(const struct path *path)
+{
+	if (droid_lkm_ks.path_put)
+		droid_lkm_ks.path_put(path);
+}
+
+__nocfi noinline void d_set_d_op(struct dentry *dentry, const struct dentry_operations *op)
+{
+	/*
+	 * a kernel without the helper keeps the default dentry operations: the
+	 * lookups still work, the dentry only stays cached longer
+	 */
+	if (droid_lkm_ks.d_set_d_op)
+		droid_lkm_ks.d_set_d_op(dentry, op);
+}
+
+__nocfi noinline int down_write_killable(struct rw_semaphore *sem)
+{
+	/*
+	 * the callers of the mmap_write_lock_killable() inline accept an
+	 * uninterruptible acquire, which is what every kernel did before the
+	 * killable variant existed
+	 */
+	if (!droid_lkm_ks.down_write_killable) {
+		down_write(sem);
+		return 0;
+	}
+	return droid_lkm_ks.down_write_killable(sem);
+}
+
+__nocfi noinline int radix_tree_tagged(const struct radix_tree_root *root, unsigned int tag)
+{
+	/* an idr that cannot be probed reads as not empty, which only keeps state */
+	if (!droid_lkm_ks.radix_tree_tagged)
+		return 0;
+	return droid_lkm_ks.radix_tree_tagged(root, tag);
+}
+
+__nocfi noinline int vfs_unlink(DROID_LKM_IDMAP_PARAM struct inode *dir, struct dentry *dentry,
+	       struct inode **deleted)
+{
+	if (!droid_lkm_ks.vfs_unlink)
+		return -ENOSYS;
+	return droid_lkm_ks.vfs_unlink(DROID_LKM_IDMAP_PASS dir, dentry,
+				       deleted);
+}
 
 typeof(&getname) droid_lkm_p_getname;
 typeof(&putname) droid_lkm_p_putname;
@@ -18,10 +186,6 @@ typeof(&get_next_ino) droid_lkm_p_get_next_ino;
 typeof(&vfs_mkobj) droid_lkm_p_vfs_mkobj;
 typeof(&fs_context_for_mount) droid_lkm_p_fs_context_for_mount;
 typeof(&get_tree_keyed) droid_lkm_p_get_tree_keyed;
-typeof(&get_ucounts) droid_lkm_p_get_ucounts;
-typeof(&put_ucounts) droid_lkm_p_put_ucounts;
-typeof(&inc_rlimit_ucounts) droid_lkm_p_inc_rlimit_ucounts;
-typeof(&dec_rlimit_ucounts) droid_lkm_p_dec_rlimit_ucounts;
 typeof(&netlink_getsockbyfilp) droid_lkm_p_netlink_getsockbyfilp;
 typeof(&netlink_attachskb) droid_lkm_p_netlink_attachskb;
 typeof(&netlink_sendskb) droid_lkm_p_netlink_sendskb;
@@ -30,6 +194,54 @@ typeof(&schedule_hrtimeout_range_clock) droid_lkm_p_schedule_hrtimeout_range_clo
 #ifdef CONFIG_COMPAT
 typeof(&get_compat_sigevent) droid_lkm_p_get_compat_sigevent;
 #endif
+
+/*
+ * the queues are charged against RLIMIT_MSGQUEUE through the ucounts of the
+ * caller. 5.10 has neither UCOUNT_RLIMIT_MSGQUEUE nor current_ucounts(), so the
+ * accounting cannot be written for it at all and is left out, which is what
+ * that kernel did: the queue keeps working, it is just not counted against the
+ * user. on the branches that have it, a symbol trimmed from the image by
+ * TRIM_UNUSED_KSYMS degrades the same way instead of failing the load.
+ */
+__nocfi noinline struct ucounts *droid_lkm_mq_ucounts_get(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	if (!droid_lkm_ks.ucounts_get)
+		return NULL;
+	return droid_lkm_ks.ucounts_get(current_ucounts());
+#else
+	return NULL;
+#endif
+}
+
+__nocfi noinline long droid_lkm_mq_ucounts_charge(struct ucounts *ucounts, unsigned long bytes)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	if (droid_lkm_ks.ucounts_inc_rlimit)
+		return droid_lkm_ks.ucounts_inc_rlimit(ucounts,
+						       UCOUNT_RLIMIT_MSGQUEUE,
+						       bytes);
+#endif
+	return 0;
+}
+
+__nocfi noinline void droid_lkm_mq_ucounts_uncharge(struct ucounts *ucounts, unsigned long bytes)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	if (droid_lkm_ks.ucounts_dec_rlimit)
+		droid_lkm_ks.ucounts_dec_rlimit(ucounts,
+						UCOUNT_RLIMIT_MSGQUEUE,
+						bytes);
+#endif
+}
+
+__nocfi noinline void droid_lkm_mq_ucounts_put(struct ucounts *ucounts)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	if (droid_lkm_ks.ucounts_put)
+		droid_lkm_ks.ucounts_put(ucounts);
+#endif
+}
 
 static bool droid_lkm_mqueue_shim_ok;
 
@@ -48,7 +260,7 @@ MODULE_PARM_DESC(mqueue,
 		}                                                              \
 	} while (0)
 
-int droid_lkm_mqueue_shim_init(void)
+__nocfi noinline int droid_lkm_mqueue_shim_init(void)
 {
 	int missing = 0;
 
@@ -57,6 +269,16 @@ int droid_lkm_mqueue_shim_init(void)
 		return -ENODATA;
 	}
 
+#ifdef CONFIG_POSIX_MQUEUE
+	/*
+	 * a kernel that builds POSIX mqueue owns mqueuefs, the fs/mqueue sysctls
+	 * and the six syscall slots, and registering our table next to the
+	 * kernel's fails with a duplicate entry. leave all of it to the kernel.
+	 */
+	droid_lkm_info("POSIX mqueue is the kernel's (CONFIG_POSIX_MQUEUE), module mqueue stays off\n");
+	return -ENODATA;
+#endif
+
 	DROID_LKM_MQ_RESOLVE(droid_lkm_p_getname, "getname");
 	DROID_LKM_MQ_RESOLVE(droid_lkm_p_putname, "putname");
 	DROID_LKM_MQ_RESOLVE(droid_lkm_p_get_next_ino, "get_next_ino");
@@ -64,12 +286,6 @@ int droid_lkm_mqueue_shim_init(void)
 	DROID_LKM_MQ_RESOLVE(droid_lkm_p_fs_context_for_mount,
 			     "fs_context_for_mount");
 	DROID_LKM_MQ_RESOLVE(droid_lkm_p_get_tree_keyed, "get_tree_keyed");
-	DROID_LKM_MQ_RESOLVE(droid_lkm_p_get_ucounts, "get_ucounts");
-	DROID_LKM_MQ_RESOLVE(droid_lkm_p_put_ucounts, "put_ucounts");
-	DROID_LKM_MQ_RESOLVE(droid_lkm_p_inc_rlimit_ucounts,
-			     "inc_rlimit_ucounts");
-	DROID_LKM_MQ_RESOLVE(droid_lkm_p_dec_rlimit_ucounts,
-			     "dec_rlimit_ucounts");
 	DROID_LKM_MQ_RESOLVE(droid_lkm_p_netlink_getsockbyfilp,
 			     "netlink_getsockbyfilp");
 	DROID_LKM_MQ_RESOLVE(droid_lkm_p_netlink_attachskb,
@@ -90,8 +306,24 @@ int droid_lkm_mqueue_shim_init(void)
 		return -ENODATA;
 	}
 
+	/*
+	 * mqueue cannot mount or open a queue without these, so they join the
+	 * readiness gate instead of degrading one operation at a time
+	 */
+	if (!droid_lkm_ks.fc_mount || !droid_lkm_ks.put_fs_context ||
+	    !droid_lkm_ks.dentry_open || !droid_lkm_ks.mntget) {
+		droid_lkm_warn("mqueue shim: mount/open helpers missing (fc_mount=%p put_fs_context=%p dentry_open=%p mntget=%p), POSIX mqueue disabled\n",
+			       droid_lkm_ks.fc_mount, droid_lkm_ks.put_fs_context,
+			       droid_lkm_ks.dentry_open, droid_lkm_ks.mntget);
+		return -ENODATA;
+	}
+
+	if (!droid_lkm_ks.ucounts_get || !droid_lkm_ks.ucounts_put ||
+	    !droid_lkm_ks.ucounts_inc_rlimit || !droid_lkm_ks.ucounts_dec_rlimit)
+		droid_lkm_warn("mqueue: RLIMIT_MSGQUEUE accounting unavailable, queues not charged\n");
+
 	droid_lkm_mqueue_shim_ok = true;
-	droid_lkm_info("mqueue shim ready (16 unexported VFS/ucount/netlink/audit helpers resolved)\n");
+	droid_lkm_info("mqueue shim ready (12 unexported VFS/netlink/timer helpers resolved)\n");
 	return 0;
 }
 

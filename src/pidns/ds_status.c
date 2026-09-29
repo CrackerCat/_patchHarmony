@@ -33,7 +33,7 @@ static bool droid_lkm_status_hooked;
 static int (*droid_lkm_status_orig)(struct seq_file *m, struct pid_namespace *ns,
 				    struct pid *pid, struct task_struct *task);
 
-static void droid_lkm_put_str(struct seq_file *m, const char *s)
+static __nocfi noinline void droid_lkm_put_str(struct seq_file *m, const char *s)
 {
 	if (droid_lkm_seq_puts_fn)
 		droid_lkm_seq_puts_fn(m, s);
@@ -41,7 +41,7 @@ static void droid_lkm_put_str(struct seq_file *m, const char *s)
 		droid_lkm_seq_write_fn(m, s, strlen(s));
 }
 
-static void droid_lkm_ns_line(struct seq_file *m, const char *tag,
+static __nocfi noinline void droid_lkm_ns_line(struct seq_file *m, const char *tag,
 			      struct task_struct *task, struct pid_namespace *ns,
 			      struct pid *pid, enum pid_type type)
 {

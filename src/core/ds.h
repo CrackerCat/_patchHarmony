@@ -15,6 +15,9 @@
 
 #define DROID_LKM_TAG "droid_lkm"
 
+/* ipc side, refuses to load when the target kernel has no locked unmap entry */
+int droid_lkm_munmap_init(void);
+
 #define droid_lkm_info(fmt, ...) pr_info("[" DROID_LKM_TAG "] " fmt, ##__VA_ARGS__)
 #define droid_lkm_warn(fmt, ...) pr_warn("[" DROID_LKM_TAG "] " fmt, ##__VA_ARGS__)
 #define droid_lkm_err(fmt, ...) pr_err("[" DROID_LKM_TAG "] " fmt, ##__VA_ARGS__)

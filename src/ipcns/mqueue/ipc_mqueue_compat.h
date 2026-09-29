@@ -12,10 +12,75 @@
 #include <linux/user_namespace.h>
 #include <linux/netlink.h>
 #include <linux/hrtimer.h>
+#include <linux/slab.h>
 #ifdef CONFIG_COMPAT
 #include <linux/compat.h>
 #endif
 
+#include "ds_caps.h"
+
+/*
+ * vfs entry points that gained an argument on the way to 6.6, plus the inode
+ * timestamp helpers 6.6 introduced. an argument count is not something a
+ * runtime capability can select, so the shape is folded here and every call
+ * site keeps one spelling. the mapping argument is a user namespace from 5.12
+ * to 6.2 and an id mapping from 6.3 on, and droid_lkm_caps.idmap_none holds the
+ * right one for each.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#define DROID_LKM_MQ_IDMAP_ARG		struct mnt_idmap *idmap,
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+#define DROID_LKM_MQ_IDMAP_ARG		struct user_namespace *mnt_userns,
+#else
+#define DROID_LKM_MQ_IDMAP_ARG
+#endif
+
+static inline void droid_lkm_mq_inode_init_ts(struct inode *inode)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+	simple_inode_init_ts(inode);
+#else
+	inode->i_mtime = inode->i_ctime = inode->i_atime = current_time(inode);
+#endif
+}
+
+static inline void droid_lkm_mq_inode_touch(struct inode *inode)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+	inode_set_atime_to_ts(inode, inode_set_ctime_current(inode));
+#else
+	inode->i_atime = inode->i_ctime = current_time(inode);
+#endif
+}
+
+static inline void *droid_lkm_mq_alloc_inode(struct super_block *sb,
+					     struct kmem_cache *cache)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	return alloc_inode_sb(sb, cache, GFP_KERNEL);
+#else
+	return kmem_cache_alloc(cache, GFP_KERNEL);
+#endif
+}
+
+static inline int droid_lkm_mq_inode_permission(struct dentry *dentry, int acc)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+	return inode_permission(droid_lkm_caps.idmap_none, d_inode(dentry), acc);
+#else
+	return inode_permission(d_inode(dentry), acc);
+#endif
+}
+
+static inline int droid_lkm_mq_vfs_unlink(struct dentry *dentry)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+	return vfs_unlink(droid_lkm_caps.idmap_none,
+			  d_inode(dentry->d_parent), dentry, NULL);
+#else
+	return vfs_unlink(d_inode(dentry->d_parent), dentry, NULL);
+#endif
+}
 
 extern typeof(&getname) droid_lkm_p_getname;
 extern typeof(&putname) droid_lkm_p_putname;
@@ -23,10 +88,18 @@ extern typeof(&get_next_ino) droid_lkm_p_get_next_ino;
 extern typeof(&vfs_mkobj) droid_lkm_p_vfs_mkobj;
 extern typeof(&fs_context_for_mount) droid_lkm_p_fs_context_for_mount;
 extern typeof(&get_tree_keyed) droid_lkm_p_get_tree_keyed;
-extern typeof(&get_ucounts) droid_lkm_p_get_ucounts;
-extern typeof(&put_ucounts) droid_lkm_p_put_ucounts;
-extern typeof(&inc_rlimit_ucounts) droid_lkm_p_inc_rlimit_ucounts;
-extern typeof(&dec_rlimit_ucounts) droid_lkm_p_dec_rlimit_ucounts;
+/*
+ * rlimit ucounts. 5.10 does not have the machinery at all (no
+ * current_ucounts(), no UCOUNT_RLIMIT_MSGQUEUE, get_ucounts and put_ucounts are
+ * static with a different shape), so the shim resolves what the running kernel
+ * has and reports the rest as "not accounted" by handing back no ucounts. the
+ * type argument of the original helpers does not survive into this interface
+ * because its enum is named per branch.
+ */
+struct ucounts *droid_lkm_mq_ucounts_get(void);
+long droid_lkm_mq_ucounts_charge(struct ucounts *ucounts, unsigned long bytes);
+void droid_lkm_mq_ucounts_uncharge(struct ucounts *ucounts, unsigned long bytes);
+void droid_lkm_mq_ucounts_put(struct ucounts *ucounts);
 extern typeof(&netlink_getsockbyfilp) droid_lkm_p_netlink_getsockbyfilp;
 extern typeof(&netlink_attachskb) droid_lkm_p_netlink_attachskb;
 extern typeof(&netlink_sendskb) droid_lkm_p_netlink_sendskb;
@@ -43,10 +116,7 @@ extern typeof(&get_compat_sigevent) droid_lkm_p_get_compat_sigevent;
 #define vfs_mkobj(d, m, f, a)		droid_lkm_p_vfs_mkobj((d), (m), (f), (a))
 #define fs_context_for_mount(t, f)	droid_lkm_p_fs_context_for_mount((t), (f))
 #define get_tree_keyed(c, f, k)		droid_lkm_p_get_tree_keyed((c), (f), (k))
-#define get_ucounts(u)			droid_lkm_p_get_ucounts(u)
-#define put_ucounts(u)			droid_lkm_p_put_ucounts(u)
-#define inc_rlimit_ucounts(u, t, v)	droid_lkm_p_inc_rlimit_ucounts((u), (t), (v))
-#define dec_rlimit_ucounts(u, t, v)	droid_lkm_p_dec_rlimit_ucounts((u), (t), (v))
+#define put_ucounts(u)			droid_lkm_mq_ucounts_put(u)
 #define netlink_getsockbyfilp(f)	droid_lkm_p_netlink_getsockbyfilp(f)
 #define netlink_attachskb(s, b, t, ss)	droid_lkm_p_netlink_attachskb((s), (b), (t), (ss))
 #define netlink_sendskb(s, b)		droid_lkm_p_netlink_sendskb((s), (b))

@@ -53,6 +53,25 @@ asmlinkage long __arm64_sys_shmctl(const struct pt_regs *regs);
 asmlinkage long __arm64_sys_shmat(const struct pt_regs *regs);
 asmlinkage long __arm64_sys_shmdt(const struct pt_regs *regs);
 
+/* 32 bit entry points, the ones arch/arm64/kernel/sys32.c names in the table */
+#ifdef CONFIG_COMPAT
+asmlinkage long __arm64_compat_sys_mq_open(const struct pt_regs *regs);
+asmlinkage long __arm64_compat_sys_mq_notify(const struct pt_regs *regs);
+asmlinkage long __arm64_compat_sys_mq_getsetattr(const struct pt_regs *regs);
+asmlinkage long __arm64_compat_sys_old_msgctl(const struct pt_regs *regs);
+asmlinkage long __arm64_compat_sys_msgrcv(const struct pt_regs *regs);
+asmlinkage long __arm64_compat_sys_msgsnd(const struct pt_regs *regs);
+asmlinkage long __arm64_compat_sys_old_semctl(const struct pt_regs *regs);
+asmlinkage long __arm64_compat_sys_old_shmctl(const struct pt_regs *regs);
+asmlinkage long __arm64_compat_sys_shmat(const struct pt_regs *regs);
+#endif
+
+#ifdef CONFIG_COMPAT_32BIT_TIME
+asmlinkage long __arm64_sys_mq_timedsend_time32(const struct pt_regs *regs);
+asmlinkage long __arm64_sys_mq_timedreceive_time32(const struct pt_regs *regs);
+asmlinkage long __arm64_sys_semtimedop_time32(const struct pt_regs *regs);
+#endif
+
 static bool droid_lkm_world_task(struct task_struct *t)
 {
 	struct nsproxy *nsp;
@@ -101,130 +120,250 @@ static bool droid_lkm_gate_allow(void)
 	return droid_lkm_world_task(current) || droid_lkm_is_droidspaces();
 }
 
-#define DROID_LKM_IPC_ORIG_BASE 180
-#define DROID_LKM_IPC_ORIG_MAX 24
-static droid_lkm_syscall_fn droid_lkm_ipc_orig[DROID_LKM_IPC_ORIG_MAX];
+/*
+ * One row per syscall the module serves. The 64 bit and the 32 bit table are
+ * both patched from this list, so the two sides cannot drift apart. nr is the
+ * build's asm/unistd.h number, nr32 is the arm EABI number from
+ * arch/arm64/include/asm/unistd32.h (same on 5.10 through 6.12), and sym32 is
+ * the entry point the kernel itself puts in compat_sys_call_table, see
+ * arch/arm64/kernel/sys32.c. Following the kernel keeps the 32 bit ABI on the
+ * old/compat/time32 variants it expects.
+ */
+#define DROID_LKM_IPC_ROWS(X, X32)						\
+	X(mq_open, __NR_mq_open, 274, compat_sys_mq_open, 1)			\
+	X(mq_unlink, __NR_mq_unlink, 275, sys_mq_unlink, 1)			\
+	X32(mq_timedsend, __NR_mq_timedsend, 276, sys_mq_timedsend_time32, 1)	\
+	X32(mq_timedreceive, __NR_mq_timedreceive, 277,				\
+	    sys_mq_timedreceive_time32, 1)					\
+	X(mq_notify, __NR_mq_notify, 278, compat_sys_mq_notify, 1)		\
+	X(mq_getsetattr, __NR_mq_getsetattr, 279, compat_sys_mq_getsetattr, 1)	\
+	X(msgget, __NR_msgget, 303, sys_msgget, 0)				\
+	X(msgctl, __NR_msgctl, 304, compat_sys_old_msgctl, 0)			\
+	X(msgrcv, __NR_msgrcv, 302, compat_sys_msgrcv, 0)			\
+	X(msgsnd, __NR_msgsnd, 301, compat_sys_msgsnd, 0)			\
+	X(semget, __NR_semget, 299, sys_semget, 0)				\
+	X(semctl, __NR_semctl, 300, compat_sys_old_semctl, 0)			\
+	X32(semtimedop, __NR_semtimedop, 312, sys_semtimedop_time32, 0)		\
+	X(semop, __NR_semop, 298, sys_semop, 0)					\
+	X(shmget, __NR_shmget, 307, sys_shmget, 0)				\
+	X(shmctl, __NR_shmctl, 308, compat_sys_old_shmctl, 0)			\
+	X(shmat, __NR_shmat, 305, compat_sys_shmat, 0)				\
+	X(shmdt, __NR_shmdt, 306, sys_shmdt, 0)
 
-static long droid_lkm_ipc_orig_call(int nr, const struct pt_regs *regs)
+static long droid_lkm_ipc_orig_call(droid_lkm_syscall_fn *orig,
+				    const struct pt_regs *regs)
 {
-	int idx = nr - DROID_LKM_IPC_ORIG_BASE;
-
-	if (idx < 0 || idx >= DROID_LKM_IPC_ORIG_MAX || !droid_lkm_ipc_orig[idx])
+	if (!orig || !*orig)
 		return -ENOSYS;
-	return droid_lkm_ipc_orig[idx](regs);
+	return (*orig)(regs);
 }
 
-#define DROID_LKM_IPC_THUNK(name, nr)                                          \
-	static long droid_lkm_thunk_##name(const struct pt_regs *regs)         \
-	{                                                               \
-		if (droid_lkm_gate_allow())                                    \
-			return __arm64_sys_##name(regs);                \
-		return droid_lkm_ipc_orig_call(nr, regs);                      \
+/*
+ * gate=0 serves everyone, gate=1 only our world, everything else keeps what the
+ * kernel had in the slot (ENOSYS on a kernel without the feature).
+ */
+#define DROID_LKM_IPC_THUNK(name)						\
+	static droid_lkm_syscall_fn droid_lkm_orig_##name;			\
+	static long droid_lkm_thunk_##name(const struct pt_regs *regs)		\
+	{									\
+		if (droid_lkm_gate_allow())					\
+			return __arm64_sys_##name(regs);			\
+		return droid_lkm_ipc_orig_call(&droid_lkm_orig_##name, regs);	\
 	}
 
-DROID_LKM_IPC_THUNK(mq_open, __NR_mq_open)
-DROID_LKM_IPC_THUNK(mq_unlink, __NR_mq_unlink)
-DROID_LKM_IPC_THUNK(mq_timedsend, __NR_mq_timedsend)
-DROID_LKM_IPC_THUNK(mq_timedreceive, __NR_mq_timedreceive)
-DROID_LKM_IPC_THUNK(mq_notify, __NR_mq_notify)
-DROID_LKM_IPC_THUNK(mq_getsetattr, __NR_mq_getsetattr)
+/*
+ * The 32 bit table gets its own thunk per syscall, it has to fall back to the
+ * original 32 bit entry and not to the 64 bit one.
+ */
+#ifdef CONFIG_COMPAT
+#define DROID_LKM_IPC_THUNK32(name, sym32)					\
+	static droid_lkm_syscall_fn droid_lkm_orig32_##name;			\
+	static long droid_lkm_thunk32_##name(const struct pt_regs *regs)	\
+	{									\
+		if (droid_lkm_gate_allow())					\
+			return __arm64_##sym32(regs);				\
+		return droid_lkm_ipc_orig_call(&droid_lkm_orig32_##name, regs);	\
+	}
+#else
+#define DROID_LKM_IPC_THUNK32(name, sym32)
+#endif
 
-DROID_LKM_IPC_THUNK(msgget, __NR_msgget)
-DROID_LKM_IPC_THUNK(msgctl, __NR_msgctl)
-DROID_LKM_IPC_THUNK(msgrcv, __NR_msgrcv)
-DROID_LKM_IPC_THUNK(msgsnd, __NR_msgsnd)
-DROID_LKM_IPC_THUNK(semget, __NR_semget)
-DROID_LKM_IPC_THUNK(semctl, __NR_semctl)
-DROID_LKM_IPC_THUNK(semtimedop, __NR_semtimedop)
-DROID_LKM_IPC_THUNK(semop, __NR_semop)
-DROID_LKM_IPC_THUNK(shmget, __NR_shmget)
-DROID_LKM_IPC_THUNK(shmctl, __NR_shmctl)
-DROID_LKM_IPC_THUNK(shmat, __NR_shmat)
-DROID_LKM_IPC_THUNK(shmdt, __NR_shmdt)
+#define DROID_LKM_IPC_DECL(name, nr, nr32, sym32, mq)				\
+	DROID_LKM_IPC_THUNK(name)						\
+	DROID_LKM_IPC_THUNK32(name, sym32)
 
-static const struct droid_lkm_ipc_slot {
+/*
+ * mq_timedsend, mq_timedreceive and semtimedop take a 32 bit timespec, their
+ * entry points only exist with both CONFIG_COMPAT and CONFIG_COMPAT_32BIT_TIME.
+ */
+#if defined(CONFIG_COMPAT) && defined(CONFIG_COMPAT_32BIT_TIME)
+#define DROID_LKM_IPC_DECL32(name, nr, nr32, sym32, mq)				\
+	DROID_LKM_IPC_DECL(name, nr, nr32, sym32, mq)
+#else
+#define DROID_LKM_IPC_DECL32(name, nr, nr32, sym32, mq)				\
+	DROID_LKM_IPC_THUNK(name)
+#endif
+
+DROID_LKM_IPC_ROWS(DROID_LKM_IPC_DECL, DROID_LKM_IPC_DECL32)
+
+struct droid_lkm_ipc_slot {
 	int nr;
+	int nr32;			/* 0: no 32 bit entry for this syscall */
 	droid_lkm_syscall_fn fn;
+	droid_lkm_syscall_fn fn32;	/* NULL when nr32 is 0 */
+	droid_lkm_syscall_fn *orig;
+	droid_lkm_syscall_fn *orig32;
 	const char *name;
 	bool needs_mqueue;
-} droid_lkm_ipc_slots[] = {
-	{ __NR_mq_open, droid_lkm_thunk_mq_open,  "mq_open" , 1 },
-	{ __NR_mq_unlink, droid_lkm_thunk_mq_unlink,  "mq_unlink" , 1 },
-	{ __NR_mq_timedsend, droid_lkm_thunk_mq_timedsend,  "mq_timedsend" , 1 },
-	{ __NR_mq_timedreceive, droid_lkm_thunk_mq_timedreceive,
-	  "mq_timedreceive", 1 },
-	{ __NR_mq_notify, droid_lkm_thunk_mq_notify,  "mq_notify" , 1 },
-	{ __NR_mq_getsetattr, droid_lkm_thunk_mq_getsetattr,  "mq_getsetattr" , 1 },
-	{ __NR_msgget, droid_lkm_thunk_msgget, "msgget" },
-	{ __NR_msgctl, droid_lkm_thunk_msgctl, "msgctl" },
-	{ __NR_msgrcv, droid_lkm_thunk_msgrcv, "msgrcv" },
-	{ __NR_msgsnd, droid_lkm_thunk_msgsnd, "msgsnd" },
-	{ __NR_semget, droid_lkm_thunk_semget, "semget" },
-	{ __NR_semctl, droid_lkm_thunk_semctl, "semctl" },
-	{ __NR_semtimedop, droid_lkm_thunk_semtimedop, "semtimedop" },
-	{ __NR_semop, droid_lkm_thunk_semop, "semop" },
-	{ __NR_shmget, droid_lkm_thunk_shmget, "shmget" },
-	{ __NR_shmctl, droid_lkm_thunk_shmctl, "shmctl" },
-	{ __NR_shmat, droid_lkm_thunk_shmat, "shmat" },
-	{ __NR_shmdt, droid_lkm_thunk_shmdt, "shmdt" },
 };
 
-static unsigned long droid_lkm_ipc_patched[ARRAY_SIZE(droid_lkm_ipc_slots)];
+#ifdef CONFIG_COMPAT
+#define DROID_LKM_IPC_ROW(name, nr, nr32, mq)					\
+	{ nr, nr32, droid_lkm_thunk_##name, droid_lkm_thunk32_##name,		\
+	  &droid_lkm_orig_##name, &droid_lkm_orig32_##name, #name, mq },
+#else
+#define DROID_LKM_IPC_ROW(name, nr, nr32, mq)					\
+	{ nr, 0, droid_lkm_thunk_##name, NULL,					\
+	  &droid_lkm_orig_##name, NULL, #name, mq },
+#endif
+
+#define DROID_LKM_IPC_ROW_NOC32(name, nr, mq)					\
+	{ nr, 0, droid_lkm_thunk_##name, NULL,					\
+	  &droid_lkm_orig_##name, NULL, #name, mq },
+
+#define DROID_LKM_IPC_ENTRY(name, nr, nr32, sym32, mq)				\
+	DROID_LKM_IPC_ROW(name, nr, nr32, mq)
+
+#if defined(CONFIG_COMPAT) && defined(CONFIG_COMPAT_32BIT_TIME)
+#define DROID_LKM_IPC_ENTRY32(name, nr, nr32, sym32, mq)			\
+	DROID_LKM_IPC_ROW(name, nr, nr32, mq)
+#else
+#define DROID_LKM_IPC_ENTRY32(name, nr, nr32, sym32, mq)			\
+	DROID_LKM_IPC_ROW_NOC32(name, nr, mq)
+#endif
+
+static const struct droid_lkm_ipc_slot droid_lkm_ipc_slots[] = {
+	DROID_LKM_IPC_ROWS(DROID_LKM_IPC_ENTRY, DROID_LKM_IPC_ENTRY32)
+};
+
+static bool droid_lkm_ipc_patched[ARRAY_SIZE(droid_lkm_ipc_slots)];
+static bool droid_lkm_ipc32_patched[ARRAY_SIZE(droid_lkm_ipc_slots)];
 
 static bool droid_lkm_skip_sysvipc;
 static bool droid_lkm_no_fake_ns;
 
-#define DROID_LKM_SLOT_SAVE_MAX 32
+/* both tables patched at runtime, 18 syscalls plus unshare/reboot/clone/clone3 */
+#define DROID_LKM_SLOT_SAVE_MAX 64
+
+struct droid_lkm_slot_save {
+	unsigned long *tab;
+	int nr;
+	unsigned long orig;
+};
+
 static unsigned long *droid_lkm_sys_call_table;
-static int droid_lkm_slot_save_nr[DROID_LKM_SLOT_SAVE_MAX];
-static unsigned long droid_lkm_slot_save_orig[DROID_LKM_SLOT_SAVE_MAX];
+static unsigned long *droid_lkm_compat_sys_call_table;
+static struct droid_lkm_slot_save droid_lkm_slot_saves[DROID_LKM_SLOT_SAVE_MAX];
 static int droid_lkm_slot_save_cnt;
 
-static int droid_lkm_slot_patch(int nr, unsigned long fn,
+static int droid_lkm_slot_patch(unsigned long *tab, int nr, unsigned long fn,
 				unsigned long *orig_out)
 {
 	int i;
 
-	if (!droid_lkm_sys_call_table || nr < 0)
+	if (!tab || nr < 0)
 		return -EINVAL;
 	if (droid_lkm_slot_save_cnt >= DROID_LKM_SLOT_SAVE_MAX)
 		return -ENOSPC;
 	for (i = 0; i < droid_lkm_slot_save_cnt; i++)
-		if (droid_lkm_slot_save_nr[i] == nr)
+		if (droid_lkm_slot_saves[i].tab == tab &&
+		    droid_lkm_slot_saves[i].nr == nr)
 			return -EEXIST;
 
-	droid_lkm_slot_save_nr[droid_lkm_slot_save_cnt] = nr;
-	droid_lkm_slot_save_orig[droid_lkm_slot_save_cnt] =
-		droid_lkm_sys_call_table[nr];
+	droid_lkm_slot_saves[droid_lkm_slot_save_cnt].tab = tab;
+	droid_lkm_slot_saves[droid_lkm_slot_save_cnt].nr = nr;
+	droid_lkm_slot_saves[droid_lkm_slot_save_cnt].orig = tab[nr];
 	if (orig_out)
-		*orig_out = droid_lkm_sys_call_table[nr];
+		*orig_out = tab[nr];
 	droid_lkm_slot_save_cnt++;
 
-	return hk_patch_write(&droid_lkm_sys_call_table[nr], fn);
+	return hk_patch_write(&tab[nr], fn);
 }
 
-static void droid_lkm_slot_unpatch(int nr)
+static void droid_lkm_slot_unpatch(unsigned long *tab, int nr)
 {
 	int i;
 
-	if (!droid_lkm_sys_call_table)
+	if (!tab)
 		return;
 	for (i = 0; i < droid_lkm_slot_save_cnt; i++) {
-		if (droid_lkm_slot_save_nr[i] != nr)
+		if (droid_lkm_slot_saves[i].tab != tab ||
+		    droid_lkm_slot_saves[i].nr != nr)
 			continue;
-		(void)hk_patch_write(&droid_lkm_sys_call_table[nr],
-				     droid_lkm_slot_save_orig[i]);
-		droid_lkm_slot_save_nr[i] =
-			droid_lkm_slot_save_nr[--droid_lkm_slot_save_cnt];
-		droid_lkm_slot_save_orig[i] =
-			droid_lkm_slot_save_orig[droid_lkm_slot_save_cnt];
+		(void)hk_patch_write(&tab[nr], droid_lkm_slot_saves[i].orig);
+		droid_lkm_slot_saves[i] =
+			droid_lkm_slot_saves[--droid_lkm_slot_save_cnt];
 		return;
 	}
 }
 
+static int droid_lkm_ipc_attach(unsigned long *tab, int nr, unsigned long fn,
+				droid_lkm_syscall_fn *orig, const char *name)
+{
+	char sym[64] = "?";
+	unsigned long cur = 0, was;
+
+	if (!tab || sc_safe_read(&cur, &tab[nr], sizeof(cur))) {
+		droid_lkm_warn("cannot read %s slot %d\n", name, nr);
+		return -EIO;
+	}
+	if (sym_name_at(cur, sym, sizeof(sym)) < 0)
+		snprintf(sym, sizeof(sym), "0x%lx", cur);
+
+	if (droid_lkm_slot_patch(tab, nr, fn, &was)) {
+		droid_lkm_warn("cannot patch %s slot %d\n", name, nr);
+		return -EIO;
+	}
+	*orig = (droid_lkm_syscall_fn)was;
+	droid_lkm_dbg("ipc slot %d (%s) 0x%lx[%s] -> ours\n", nr, name, cur,
+		      sym);
+	return 0;
+}
+
+static void droid_lkm_slot_patch_ipc_compat(void)
+{
+	int patched = 0, i;
+
+	if (!droid_lkm_compat_sys_call_table)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(droid_lkm_ipc_slots); i++) {
+		const struct droid_lkm_ipc_slot *s = &droid_lkm_ipc_slots[i];
+
+		if (!s->nr32 || !s->fn32) {
+			droid_lkm_info("compat ipc %s: no 32 bit entry on this kernel\n",
+				       s->name);
+			continue;
+		}
+		if (s->needs_mqueue && !droid_lkm_mqueue_ready()) {
+			droid_lkm_dbg("skip compat %s: mqueue not ready\n",
+				      s->name);
+			continue;
+		}
+		if (droid_lkm_ipc_attach(droid_lkm_compat_sys_call_table, s->nr32,
+					 (unsigned long)s->fn32, s->orig32,
+					 s->name))
+			continue;
+		droid_lkm_ipc32_patched[i] = true;
+		patched++;
+	}
+
+	droid_lkm_info("compat ipc syscalls wired: %d/%zu\n", patched,
+		       ARRAY_SIZE(droid_lkm_ipc_slots));
+}
+
 static int droid_lkm_slot_patch_ipc(void)
 {
-	unsigned long orig;
 	int patched = 0, i;
 
 	if (droid_lkm_skip_sysvipc) {
@@ -233,38 +372,24 @@ static int droid_lkm_slot_patch_ipc(void)
 	}
 
 	for (i = 0; i < ARRAY_SIZE(droid_lkm_ipc_slots); i++) {
-		char name[64] = "?";
+		const struct droid_lkm_ipc_slot *s = &droid_lkm_ipc_slots[i];
 
-
-		if (droid_lkm_ipc_slots[i].needs_mqueue && !droid_lkm_mqueue_ready()) {
-			droid_lkm_warn("skip %s: mqueue not ready\n",
-				       droid_lkm_ipc_slots[i].name);
+		if (s->needs_mqueue && !droid_lkm_mqueue_ready()) {
+			droid_lkm_warn("skip %s: mqueue not ready\n", s->name);
 			continue;
 		}
-		unsigned long cur = sc_entry(droid_lkm_ipc_slots[i].nr);
-
-		if (sym_name_at(cur, name, sizeof(name)) < 0)
-			snprintf(name, sizeof(name), "0x%lx", cur);
-
-		if (droid_lkm_slot_patch(droid_lkm_ipc_slots[i].nr,
-			     (unsigned long)droid_lkm_ipc_slots[i].fn, &orig)) {
-			droid_lkm_warn("cannot patch %s\n", droid_lkm_ipc_slots[i].name);
+		if (droid_lkm_ipc_attach(droid_lkm_sys_call_table, s->nr,
+					 (unsigned long)s->fn, s->orig, s->name))
 			continue;
-		}
-		{
-			int idx = droid_lkm_ipc_slots[i].nr - DROID_LKM_IPC_ORIG_BASE;
-
-			if (idx >= 0 && idx < DROID_LKM_IPC_ORIG_MAX)
-				droid_lkm_ipc_orig[idx] = (droid_lkm_syscall_fn)orig;
-		}
-		droid_lkm_ipc_patched[i] = 1;
+		droid_lkm_ipc_patched[i] = true;
 		patched++;
-		droid_lkm_dbg("ipc slot %d (%s) 0x%lx[%s] -> ours\n",
-			droid_lkm_ipc_slots[i].nr, droid_lkm_ipc_slots[i].name, cur, name);
 	}
 
 	droid_lkm_info("ipc syscalls wired: %d/%zu\n", patched,
 		ARRAY_SIZE(droid_lkm_ipc_slots));
+
+	droid_lkm_slot_patch_ipc_compat();
+
 	return patched ? 0 : -ENODATA;
 }
 
@@ -274,7 +399,7 @@ static int droid_lkm_slot_patch_ipc(void)
 
 module_param_named(skip_sysvipc, droid_lkm_skip_sysvipc, bool, 0444);
 MODULE_PARM_DESC(skip_sysvipc,
-	"do not take over the 18 ipc syscall slots (6 POSIX mqueue + 12 SysV)");
+	"do not take over the 18 ipc syscall slots (6 POSIX mqueue + 12 SysV) in the 64 bit and the 32 bit table");
 
 module_param_named(no_fake_ns, droid_lkm_no_fake_ns, bool, 0444);
 MODULE_PARM_DESC(no_fake_ns, "diagnostic: fake-success unshare() without attaching our ns");
@@ -488,7 +613,7 @@ __nocfi noinline int droid_lkm_cn_wrap(unsigned long flags, struct task_struct *
 	return 0;
 }
 
-static bool droid_lkm_unshare_precheck(unsigned long flags)
+static __nocfi noinline bool droid_lkm_unshare_precheck(unsigned long flags)
 {
 	unsigned long f = flags;
 
@@ -741,7 +866,7 @@ static int droid_lkm_clone_ns_check(unsigned long flags)
 	return 0;
 }
 
-static bool droid_lkm_clone_ns_ready(unsigned long flags)
+static __nocfi noinline bool droid_lkm_clone_ns_ready(unsigned long flags)
 {
 	return (flags & (CLONE_NEWPID | CLONE_NEWIPC)) && droid_lkm_cnn_hooked &&
 	       droid_lkm_ks.switch_task_namespaces && droid_lkm_gate_allow();
@@ -819,18 +944,20 @@ static int droid_lkm_clone_slot_install(void)
 {
 	int ret;
 
-	ret = droid_lkm_slot_patch(__NR_clone, (unsigned long)droid_lkm_sys_clone,
+	ret = droid_lkm_slot_patch(droid_lkm_sys_call_table, __NR_clone,
+		       (unsigned long)droid_lkm_sys_clone,
 		       (unsigned long *)&droid_lkm_orig_clone);
 	if (ret) {
 		droid_lkm_warn("cannot patch clone slot: %d\n", ret);
 		return ret;
 	}
 
-	ret = droid_lkm_slot_patch(__NR_clone3, (unsigned long)droid_lkm_sys_clone3,
+	ret = droid_lkm_slot_patch(droid_lkm_sys_call_table, __NR_clone3,
+		       (unsigned long)droid_lkm_sys_clone3,
 		       (unsigned long *)&droid_lkm_orig_clone3);
 	if (ret) {
 		droid_lkm_warn("cannot patch clone3 slot: %d\n", ret);
-		droid_lkm_slot_unpatch(__NR_clone);
+		droid_lkm_slot_unpatch(droid_lkm_sys_call_table, __NR_clone);
 		return ret;
 	}
 
@@ -867,6 +994,13 @@ int droid_lkm_slot_init(void)
 	droid_lkm_sys_call_table =
 		(unsigned long *)droid_lkm_sym("sys_call_table");
 
+#ifdef CONFIG_COMPAT
+	droid_lkm_compat_sys_call_table =
+		(unsigned long *)droid_lkm_sym("compat_sys_call_table");
+	if (!droid_lkm_compat_sys_call_table)
+		droid_lkm_info("no compat_sys_call_table in kallsyms, 32 bit ipc syscalls stay ENOSYS\n");
+#endif
+
 	memset(&droid_lkm_sc_cfg, 0, sizeof(droid_lkm_sc_cfg));
 	droid_lkm_sc_cfg.layout = &droid_lkm_sc_layout;
 	droid_lkm_sc_cfg.no_patch = true;
@@ -878,18 +1012,20 @@ int droid_lkm_slot_init(void)
 		return ret;
 	}
 
-	ret = droid_lkm_slot_patch(__NR_unshare, (unsigned long)droid_lkm_sys_unshare,
+	ret = droid_lkm_slot_patch(droid_lkm_sys_call_table, __NR_unshare,
+		       (unsigned long)droid_lkm_sys_unshare,
 		       (unsigned long *)&droid_lkm_orig_unshare);
 	if (ret) {
 		droid_lkm_err("cannot patch unshare slot: %d\n", ret);
 		goto err_sc;
 	}
 
-	ret = droid_lkm_slot_patch(__NR_reboot, (unsigned long)droid_lkm_sys_reboot,
+	ret = droid_lkm_slot_patch(droid_lkm_sys_call_table, __NR_reboot,
+		       (unsigned long)droid_lkm_sys_reboot,
 		       (unsigned long *)&droid_lkm_orig_reboot);
 	if (ret) {
 		droid_lkm_err("cannot patch reboot slot: %d\n", ret);
-		droid_lkm_slot_unpatch(__NR_unshare);
+		droid_lkm_slot_unpatch(droid_lkm_sys_call_table, __NR_unshare);
 		goto err_sc;
 	}
 
@@ -924,19 +1060,26 @@ void droid_lkm_slot_exit(void)
 	}
 
 	for (i = 0; i < ARRAY_SIZE(droid_lkm_ipc_slots); i++) {
+		const struct droid_lkm_ipc_slot *s = &droid_lkm_ipc_slots[i];
+
 		if (droid_lkm_ipc_patched[i]) {
-			droid_lkm_slot_unpatch(droid_lkm_ipc_slots[i].nr);
-			droid_lkm_ipc_patched[i] = 0;
+			droid_lkm_slot_unpatch(droid_lkm_sys_call_table, s->nr);
+			droid_lkm_ipc_patched[i] = false;
+		}
+		if (droid_lkm_ipc32_patched[i]) {
+			droid_lkm_slot_unpatch(droid_lkm_compat_sys_call_table,
+					       s->nr32);
+			droid_lkm_ipc32_patched[i] = false;
 		}
 	}
 
 	if (droid_lkm_orig_clone3)
-		droid_lkm_slot_unpatch(__NR_clone3);
+		droid_lkm_slot_unpatch(droid_lkm_sys_call_table, __NR_clone3);
 	if (droid_lkm_orig_clone)
-		droid_lkm_slot_unpatch(__NR_clone);
+		droid_lkm_slot_unpatch(droid_lkm_sys_call_table, __NR_clone);
 	if (droid_lkm_orig_reboot)
-		droid_lkm_slot_unpatch(__NR_reboot);
+		droid_lkm_slot_unpatch(droid_lkm_sys_call_table, __NR_reboot);
 	if (droid_lkm_orig_unshare)
-		droid_lkm_slot_unpatch(__NR_unshare);
+		droid_lkm_slot_unpatch(droid_lkm_sys_call_table, __NR_unshare);
 	sc_exit();
 }

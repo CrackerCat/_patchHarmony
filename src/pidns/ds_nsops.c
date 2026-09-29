@@ -15,10 +15,27 @@
 #include <linux/pid_namespace.h>
 #include <linux/sched.h>
 #include <linux/user_namespace.h>
+#include <linux/ipc_namespace.h>
 
 #include "ds.h"
 #include "ds_compat.h"
 #include "ds_nsops.h"
+#include "ds_pidns.h"
+
+/*
+ * owner() is called on whatever namespace the ops are attached to, so it has
+ * to reach the concrete type. ns_common sits at a different offset in each one,
+ * hence one accessor per type, picked where the ops table is built.
+ */
+static struct user_namespace *droid_lkm_pidns_ns_owner(struct ns_common *ns)
+{
+	return container_of(ns, struct pid_namespace, ns)->user_ns;
+}
+
+static struct user_namespace *droid_lkm_ipcns_ns_owner(struct ns_common *ns)
+{
+	return container_of(ns, struct ipc_namespace, ns)->user_ns;
+}
 
 struct droid_lkm_ns_ops_alias {
 	struct proc_ns_operations ops;
@@ -26,11 +43,11 @@ struct droid_lkm_ns_ops_alias {
 };
 
 /*
- * a neutralized namespace outlives the module, so its ops must never reach a
- * callback that reads fields of the namespace type it was built for. the
- * kernel keeps such an nsfs inode on the file it was opened from and can still
- * call install (setns), owner (NS_GET_OWNER_UID/NS_GET_NSTYPE) and get_parent
- * (NS_GET_PARENT) on it, so every callback is inert.
+ * a neutralized namespace outlives the module, so the ops it carries are read
+ * long after unload: an nsfs inode opened from it still reaches install (setns)
+ * and get_parent (NS_GET_PARENT), and both refuse. owner is the one callback
+ * that may read the namespace, because the alias was built for the concrete
+ * type of the leak and the leak keeps that object alive.
  */
 static struct ns_common *droid_lkm_ns_neutral_get(struct task_struct *task)
 {
@@ -44,11 +61,6 @@ static void droid_lkm_ns_neutral_put(struct ns_common *ns)
 static int droid_lkm_ns_neutral_install(struct nsset *nsset, struct ns_common *ns)
 {
 	return -EINVAL;
-}
-
-static struct user_namespace *droid_lkm_ns_neutral_owner(struct ns_common *ns)
-{
-	return &init_user_ns;
 }
 
 static struct ns_common *droid_lkm_ns_neutral_get_parent(struct ns_common *ns)
@@ -72,8 +84,20 @@ const struct proc_ns_operations *droid_lkm_ns_ops_alias(const char *name,
 	alias->ops.get = droid_lkm_ns_neutral_get;
 	alias->ops.put = droid_lkm_ns_neutral_put;
 	alias->ops.install = droid_lkm_ns_neutral_install;
-	alias->ops.owner = droid_lkm_ns_neutral_owner;
 	alias->ops.get_parent = droid_lkm_ns_neutral_get_parent;
+
+	switch (type) {
+	case CLONE_NEWPID:
+		alias->ops.owner = droid_lkm_pidns_ns_owner;
+		break;
+	case CLONE_NEWIPC:
+		alias->ops.owner = droid_lkm_ipcns_ns_owner;
+		break;
+	default:
+		/* an unknown type would make owner() read the wrong object */
+		kfree(alias);
+		return NULL;
+	}
 
 	return &alias->ops;
 }
@@ -83,18 +107,29 @@ void droid_lkm_ns_neutralize(struct ns_common *ns, const struct proc_ns_operatio
 	if (!ns || !ops)
 		return;
 
-
-
+	/*
+	 * 5.10 has no ns_common::count, and the counters of the concrete types
+	 * are only decremented by put paths that do not exist without
+	 * CONFIG_PID_NS and CONFIG_IPC_NS, so the pin is only needed from 5.15
+	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 	refcount_set(&ns->count, DROID_LKM_NS_LEAK_REFCOUNT);
+#endif
 	ns->ops = ops;
 }
 
-static struct ns_common *droid_lkm_host_pid_ns_object;
+/*
+ * the host placeholder stands in for init_pid_ns, so it is a whole struct
+ * pid_namespace: owner() reaches the user namespace through container_of
+ */
+static struct pid_namespace *droid_lkm_host_pid_ns_object;
 
 static struct ns_common *droid_lkm_host_pid_get(struct task_struct *task)
 {
 
-	return droid_lkm_host_pid_ns_object;
+	if (!droid_lkm_host_pid_ns_object)
+		return NULL;
+	return &droid_lkm_host_pid_ns_object->ns;
 }
 
 static void droid_lkm_host_ns_put(struct ns_common *ns)
@@ -120,11 +155,6 @@ static int droid_lkm_host_pid_install(struct nsset *nsset, struct ns_common *ns)
 
 	nsset->nsproxy->pid_ns_for_children = &init_pid_ns;
 	return 0;
-}
-
-static struct user_namespace *droid_lkm_host_ns_owner(struct ns_common *ns)
-{
-	return &init_user_ns;
 }
 
 static struct ns_common *droid_lkm_host_ns_get_parent(struct ns_common *ns)
@@ -159,7 +189,7 @@ static struct proc_ns_operations *droid_lkm_host_ops_build(const char *name,
 	b->ops.get = droid_lkm_host_pid_get;
 	b->ops.put = droid_lkm_host_ns_put;
 	b->ops.install = droid_lkm_host_pid_install;
-	b->ops.owner = droid_lkm_host_ns_owner;
+	b->ops.owner = droid_lkm_pidns_ns_owner;
 	b->ops.get_parent = droid_lkm_host_ns_get_parent;
 	return &b->ops;
 }
@@ -169,7 +199,7 @@ static struct proc_ns_operations *droid_lkm_host_pidfc_ops_built;
 
 int droid_lkm_ns_ops_host_init(void)
 {
-	struct ns_common *ns;
+	struct pid_namespace *ns;
 
 	ns = kzalloc(sizeof(*ns), GFP_KERNEL);
 	if (!ns)
@@ -187,14 +217,15 @@ int droid_lkm_ns_ops_host_init(void)
 		return -ENOMEM;
 	}
 
-	droid_lkm_ns_stash_clear(ns);
-	ns->inum = PROC_PID_INIT_INO;
-	refcount_set(&ns->count, DROID_LKM_NS_LEAK_REFCOUNT);
+	ns->user_ns = &init_user_ns;
+	droid_lkm_ns_stash_clear(&ns->ns);
+	ns->ns.inum = PROC_PID_INIT_INO;
+	refcount_set(droid_lkm_pidns_refcount(ns), DROID_LKM_NS_LEAK_REFCOUNT);
 
-	ns->ops = droid_lkm_host_pid_ops_built;
+	ns->ns.ops = droid_lkm_host_pid_ops_built;
 	droid_lkm_host_pid_ns_object = ns;
 
-	droid_lkm_info("host pid ns placeholder ready (inum=%u)\n", ns->inum);
+	droid_lkm_info("host pid ns placeholder ready (inum=%u)\n", ns->ns.inum);
 	return 0;
 }
 

@@ -67,10 +67,18 @@
 #include <linux/ipc_namespace.h>
 #include <linux/rhashtable.h>
 #include <linux/log2.h>
+#include <linux/version.h>
 
 #include <asm/unistd.h>
 
 #include "ipc_util.h"
+
+/* pde_data() arrived in 6.1, the older branches spell the accessor PDE_DATA() */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#define droid_lkm_pde_data(inode)	pde_data(inode)
+#else
+#define droid_lkm_pde_data(inode)	PDE_DATA(inode)
+#endif
 
 struct ipc_proc_iface {
 	const char *path;
@@ -962,7 +970,7 @@ static int sysvipc_proc_open(struct inode *inode, struct file *file)
 	if (!iter)
 		return -ENOMEM;
 
-	iter->iface = pde_data(inode);
+	iter->iface = droid_lkm_pde_data(inode);
 	iter->ns    = get_ipc_ns(droid_lkm_ipcns_current());
 	iter->pid_ns = get_pid_ns(task_active_pid_ns(current));
 

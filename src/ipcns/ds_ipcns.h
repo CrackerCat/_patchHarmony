@@ -26,6 +26,7 @@ bool droid_lkm_ipcns_is_ours(struct ipc_namespace *ns);
 
 
 bool droid_lkm_ipcns_is_host(struct ipc_namespace *ns);
+struct ipc_namespace *droid_lkm_ipcns_host_ns(void);
 
 
 bool droid_lkm_ipcns_busy(void);

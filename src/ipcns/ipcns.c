@@ -32,6 +32,20 @@
 #include "ipc_util.h"
 
 
+/*
+ * ns_common carries its own refcount from 5.15 on; 5.10 keeps the count of an
+ * ipc namespace in the refcount_t at the top of the struct. one accessor keeps
+ * every call site identical on both shapes.
+ */
+static inline refcount_t *droid_lkm_ipcns_refcount(struct ipc_namespace *ns)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+	return &ns->ns.count;
+#else
+	return &ns->count;
+#endif
+}
+
 struct droid_lkm_ipcns_entry {
 	struct list_head node;
 	struct ipc_namespace *ns;
@@ -43,6 +57,10 @@ static DEFINE_SPINLOCK(droid_lkm_ipcns_lock);
 
 static struct ipc_namespace *droid_lkm_ipcns_host;
 static struct ipc_namespace *droid_lkm_ipcns_orig;
+#ifdef CONFIG_IPC_NS
+/* the kernel owns ipc namespaces in this build, see create() */
+static bool droid_lkm_ipcns_kernel_owned;
+#endif
 
 
 static const struct proc_ns_operations *droid_lkm_ipcns_neutral_ops;
@@ -74,11 +92,24 @@ static void droid_lkm_ipcns_destroy_ids(struct ipc_namespace *ns)
 	}
 }
 
-struct ipc_namespace *droid_lkm_ipcns_create(void)
+__nocfi noinline struct ipc_namespace *droid_lkm_ipcns_create(void)
 {
 	struct droid_lkm_ipcns_entry *e;
 	struct ipc_namespace *ns;
 	int err;
+
+#ifdef CONFIG_IPC_NS
+	/*
+	 * this kernel allocates, refcounts and frees ipc namespaces itself, and a
+	 * namespace of ours has no ucounts for its free_ipc_ns(). asking the kernel
+	 * for one through copy_ipcs() and then filling in the sysv state is not
+	 * safe either: the state is already initialized there, and reinitializing
+	 * it trips __list_add_valid inside msg_init_ns (see the 6.1 run of
+	 * out/qemu-v9-android14-6.1.log). refuse cleanly instead.
+	 */
+	if (droid_lkm_ipcns_kernel_owned)
+		return ERR_PTR(-EOPNOTSUPP);
+#endif
 
 	ns = kzalloc(sizeof(*ns), GFP_KERNEL_ACCOUNT);
 	if (!ns)
@@ -89,7 +120,7 @@ struct ipc_namespace *droid_lkm_ipcns_create(void)
 		goto out_free;
 
 	ns->ns.ops = &droid_lkm_ipcns_ops;
-	refcount_set(&ns->ns.count, 1);
+	refcount_set(droid_lkm_ipcns_refcount(ns), 1);
 	/* same ownership rule as the fake pid namespace, see droid_lkm_pidns_create */
 	ns->user_ns = current_cred()->user_ns;
 	ns->ucounts = NULL;
@@ -171,6 +202,12 @@ bool droid_lkm_ipcns_is_host(struct ipc_namespace *ns)
 	return ns && ns == droid_lkm_ipcns_host;
 }
 
+/* the namespace the module serves as the host, the kernel's own when it has one */
+struct ipc_namespace *droid_lkm_ipcns_host_ns(void)
+{
+	return droid_lkm_ipcns_host;
+}
+
 bool droid_lkm_ipcns_task_is_host(struct task_struct *task)
 {
 	return droid_lkm_ipcns_is_host(droid_lkm_ipcns_task_ns(task));
@@ -179,13 +216,13 @@ bool droid_lkm_ipcns_task_is_host(struct task_struct *task)
 struct ipc_namespace *droid_lkm_ipcns_get(struct ipc_namespace *ns)
 {
 	if (ns)
-		refcount_inc(&ns->ns.count);
+		refcount_inc(droid_lkm_ipcns_refcount(ns));
 	return ns;
 }
 
 void droid_lkm_ipcns_put(struct ipc_namespace *ns)
 {
-	if (ns && !refcount_dec_not_one(&ns->ns.count))
+	if (ns && !refcount_dec_not_one(droid_lkm_ipcns_refcount(ns)))
 		droid_lkm_dbg("ipcns %p refcount one not dropped\n", ns);
 }
 
@@ -347,7 +384,7 @@ int droid_lkm_ipcns_init(void)
 	droid_lkm_ipcns_host->ns.inum = PROC_IPC_INIT_INO;
 	
 	droid_lkm_ipcns_host->ns.ops = &droid_lkm_ipcns_ops;
-	refcount_set(&droid_lkm_ipcns_host->ns.count, 1);
+	refcount_set(droid_lkm_ipcns_refcount(droid_lkm_ipcns_host), 1);
 	droid_lkm_ipcns_host->user_ns = &init_user_ns;
 
 	droid_lkm_ipcns_init_entry.ns = droid_lkm_ipcns_host;
@@ -362,16 +399,43 @@ int droid_lkm_ipcns_init(void)
 		droid_lkm_ipcns_exit();
 		return -ENODATA;
 	}
+#ifdef CONFIG_IPC_NS
+	/*
+	 * the kernel's own init ipc namespace is the one every task already
+	 * points at, so serve it rather than install a substitute. only the sysv
+	 * and mqueue state has to be filled in, because the trees that turn
+	 * CONFIG_IPC_NS on leave CONFIG_SYSVIPC off. the namespace itself stays
+	 * the kernel's, which keeps its free_ipc_ns() and mq_open() consistent.
+	 */
+	droid_lkm_ipcns_kernel_owned = true;
+	droid_lkm_ipcns_orig = droid_lkm_init_nsproxy->ipc_ns;
+	droid_lkm_ipcns_host = droid_lkm_ipcns_orig;
+	if (!droid_lkm_ipcns_host) {
+		droid_lkm_err("init_nsproxy has no ipc ns\n");
+		droid_lkm_ipcns_exit();
+		return -ENODATA;
+	}
+	msg_init_ns(droid_lkm_ipcns_host);
+	sem_init_ns(droid_lkm_ipcns_host);
+	shm_init_ns(droid_lkm_ipcns_host);
+	if (droid_lkm_mqueue_ready() &&
+	    droid_lkm_mq_init_ns(droid_lkm_ipcns_host))
+		droid_lkm_warn("host ipcns: mqueue mount failed, POSIX mqueue stays off\n");
+	droid_lkm_ipcns_init_entry.ns = droid_lkm_ipcns_host;
+	droid_lkm_info("host ipcns %p is the kernel's own, sysv state adopted\n",
+		       droid_lkm_ipcns_host);
+#else
 	droid_lkm_ipcns_orig = droid_lkm_init_nsproxy->ipc_ns;
 	droid_lkm_init_nsproxy->ipc_ns = droid_lkm_ipcns_host;
 	droid_lkm_info("host ipcns %p installed into init_nsproxy\n", droid_lkm_ipcns_host);
+#endif
 
 	droid_lkm_ipc_sysctls_init();
 	return 0;
 }
 
 
-void droid_lkm_ipcns_exit(void)
+__nocfi noinline void droid_lkm_ipcns_exit(void)
 {
 	struct droid_lkm_ipcns_entry *e;
 	unsigned long flags;
@@ -407,12 +471,12 @@ void droid_lkm_ipcns_exit(void)
 		}
 
 		if (droid_lkm_ns_stashed(&e->ns->ns) ||
-		    refcount_read(&e->ns->ns.count) > 1 ||
+		    refcount_read(droid_lkm_ipcns_refcount(e->ns)) > 1 ||
 		    droid_lkm_ipcns_in_use(e->ns)) {
 			
 			droid_lkm_warn("ipcns %p neutralized+leaked (stashed=%p count=%d in_use=%d)\n",
 				e->ns, droid_lkm_ns_stash_ptr(&e->ns->ns),
-				refcount_read(&e->ns->ns.count),
+				refcount_read(droid_lkm_ipcns_refcount(e->ns)),
 				droid_lkm_ipcns_in_use(e->ns) ? 1 : 0);
 			droid_lkm_ns_neutralize(&e->ns->ns, droid_lkm_ipcns_neutral_ops);
 			leaked++;

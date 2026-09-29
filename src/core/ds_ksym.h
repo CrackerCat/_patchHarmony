@@ -8,6 +8,12 @@
 #define DROID_LKM_KSYM_H
 
 #include <linux/types.h>
+
+/* the thunk shapes that differ per branch are spelled in ds_compat.h */
+#include "ds_compat.h"
+
+struct ma_state;
+struct vma_iterator;
 #include <linux/pid.h>
 #include <linux/pid_namespace.h>
 #include <linux/sched/signal.h>
@@ -30,6 +36,21 @@ struct sigevent;
 struct vfsmount;
 struct fs_context;
 struct mnt_idmap;
+struct user_namespace;
+struct user_struct;
+struct path;
+struct cred;
+struct ctl_table;
+struct ctl_table_header;
+struct ipc_namespace;
+struct ipc_ids;
+struct inode;
+struct dentry;
+struct dentry_operations;
+struct rw_semaphore;
+struct kprobe;
+struct proc_ns_operations;
+struct ucounts;
 
 struct droid_lkm_ksym {
 
@@ -48,6 +69,10 @@ struct droid_lkm_ksym {
 			     struct rusage __user *ru);
 
 
+	unsigned long (*do_mmap_legacy)(struct file *file, unsigned long addr,
+					unsigned long len, unsigned long prot,
+					unsigned long flags, unsigned long pgoff,
+					unsigned long *populate, struct list_head *uf);
 	unsigned long (*do_mmap)(struct file *file, unsigned long addr,
 				 unsigned long len, unsigned long prot,
 				 unsigned long flags, unsigned long vm_flags,
@@ -70,7 +95,8 @@ struct droid_lkm_ksym {
 	s64 (*__percpu_counter_sum)(struct percpu_counter *fbc);
 
 
-	int (*shmem_lock)(struct file *file, int lock, struct ucounts *ucounts);
+	int (*shmem_lock)(struct file *file, int lock,
+			  DROID_LKM_SHMEM_LOCK_PARAM);
 	struct file *(*shmem_kernel_file_setup)(const char *name, loff_t size,
 						unsigned long flags);
 	void (*shmem_unlock_mapping)(struct address_space *mapping);
@@ -78,11 +104,14 @@ struct droid_lkm_ksym {
 					 const struct file_operations *fops);
 	int (*__mm_populate)(unsigned long addr, unsigned long len,
 			     int ignore_errors);
-	int (*do_vmi_align_munmap)(struct vma_iterator *vmi,
-				   struct vm_area_struct *vma,
-				   struct mm_struct *mm, unsigned long start,
-				   unsigned long end, struct list_head *uf,
-				   bool unlock);
+	int (*__do_munmap)(struct mm_struct *mm, unsigned long start,
+			   size_t len, struct list_head *uf, bool downgrade);
+	int (*do_mas_munmap)(struct ma_state *mas, struct mm_struct *mm,
+			     unsigned long start, size_t len,
+			     struct list_head *uf, bool unlock);
+	int (*do_vmi_munmap)(struct vma_iterator *vmi, struct mm_struct *mm,
+			     unsigned long start, size_t len,
+			     struct list_head *uf, bool unlock);
 
 
 	void (*switch_task_namespaces)(struct task_struct *p, struct nsproxy *new);
@@ -92,7 +121,7 @@ struct droid_lkm_ksym {
 	 * trimmed from some GKI kernels by TRIM_UNUSED_KSYMS, so they resolve at
 	 * load time like the rest of the table.
 	 */
-	int (*inode_permission)(struct mnt_idmap *idmap, struct inode *inode,
+	int (*inode_permission)(DROID_LKM_IDMAP_PARAM struct inode *inode,
 				int mask);
 	int (*mnt_want_write)(struct vfsmount *mnt);
 	void (*mnt_drop_write)(struct vfsmount *mnt);
@@ -148,11 +177,72 @@ struct droid_lkm_ksym {
 	void (*__audit_mq_notify)(mqd_t mqdes,
 				  const struct sigevent *notification);
 	void (*__audit_mq_getsetattr)(mqd_t mqdes, struct mq_attr *mqstat);
+
+	/*
+	 * mqueue rlimit accounting. 5.10 has no rlimit ucounts at all, so a
+	 * missing symbol turns the accounting off and leaves the queues fully
+	 * usable. the type argument is an int because the enum behind it is
+	 * named differently on each branch, and every one of them is int sized.
+	 * the fields carry a ucounts_ prefix because the kernel names collide
+	 * with the call site macros in ipc_mqueue_compat.h.
+	 */
+	struct ucounts *(*ucounts_get)(struct ucounts *ucounts);
+	void (*ucounts_put)(struct ucounts *ucounts);
+	long (*ucounts_inc_rlimit)(struct ucounts *ucounts, droid_lkm_rlimit_type type, long v);
+	bool (*ucounts_dec_rlimit)(struct ucounts *ucounts, droid_lkm_rlimit_type type, long v);
+
+	/*
+	 * kernel helpers that a stock GKI image may not export. linking them
+	 * makes the module fail to load on such an image with -ENOENT, so each
+	 * one is resolved here and ipc_mqueue_shim.c defines the kernel name and
+	 * refuses cleanly when it is missing. the shapes are identical on every
+	 * branch we build for, except the two that already have a compat macro.
+	 */
+	struct file *(*dentry_open)(const struct path *path, int flags,
+				    const struct cred *cred);
+	int (*do_send_sig_info)(int sig, struct kernel_siginfo *info,
+				struct task_struct *p, enum pid_type type);
+	struct vfsmount *(*fc_mount)(struct fs_context *fc);
+	struct vfsmount *(*mntget)(struct vfsmount *mnt);
+	void (*put_fs_context)(struct fs_context *fc);
+	void (*free_ipcs)(struct ipc_namespace *ns, struct ipc_ids *ids,
+			  void (*free)(struct ipc_namespace *ns,
+				       struct kern_ipc_perm *ipcp));
+	void (*put_ipc_ns)(struct ipc_namespace *ns);
+	pid_t (*pid_nr_ns)(struct pid *pid, struct pid_namespace *ns);
+	pid_t (*pid_vnr)(struct pid *pid);
+	int (*proc_dointvec_minmax)(DROID_LKM_CTL_TABLE *table, int write,
+				    void *buffer, size_t *lenp, loff_t *ppos);
+	int (*proc_doulongvec_minmax)(DROID_LKM_CTL_TABLE *table, int write,
+				      void *buffer, size_t *lenp,
+				      loff_t *ppos);
+	int (*register_kprobe)(struct kprobe *p);
+	void (*unregister_kprobe)(struct kprobe *p);
+	int (*kern_path)(const char *name, unsigned int flags,
+			 struct path *path);
+	void (*path_put)(const struct path *path);
+	void (*d_set_d_op)(struct dentry *dentry,
+			   const struct dentry_operations *op);
+	int (*down_write_killable)(struct rw_semaphore *sem);
+	int (*radix_tree_tagged)(const struct radix_tree_root *root,
+				 unsigned int tag);
+	int (*vfs_unlink)(DROID_LKM_IDMAP_PARAM struct inode *dir,
+			  struct dentry *dentry, struct inode **deleted);
+	struct ctl_table_header *(*register_sysctl)(const char *path,
+						    struct ctl_table *table);
+	void (*unregister_sysctl_table)(struct ctl_table_header *header);
+	struct ipc_namespace *(*copy_ipcs)(unsigned long flags,
+					   struct user_namespace *user_ns,
+					   struct ipc_namespace *ns);
 };
 
 extern struct droid_lkm_ksym droid_lkm_ks;
 
 extern int *droid_lkm_ks_sysctl_overcommit_memory;
+
+/* data symbols of the same class, dereferenced through these pointers */
+extern rwlock_t *droid_lkm_ks_tasklist_lock;
+extern const struct proc_ns_operations *droid_lkm_ks_ipcns_operations;
 
 int droid_lkm_ksym_init(void);
 

@@ -28,6 +28,9 @@
 #include <uapi/linux/wait.h>
 #include <linux/reboot.h>
 #include <linux/signal.h>
+#include <linux/sysctl.h>
+#include <linux/namei.h>
+#include <linux/path.h>
 
 #include "ds.h"
 #include "ds_compat.h"
@@ -35,6 +38,7 @@
 #include "ds_ipcns.h"
 #include "ds_nsops.h"
 #include "ds_pidns.h"
+#include "ipc_sysctl.h"
 
 bool droid_lkm_task_ipc_exit_defer(struct task_struct *tsk);
 void droid_lkm_task_ipc_deferred_run(void);
@@ -94,8 +98,9 @@ static struct kmem_cache *droid_lkm_create_pid_cachep(unsigned int level)
 	mutex_lock(&droid_lkm_pid_caches_mutex);
 	if (!*pkc)
 		*pkc = kmem_cache_create(name,
-					 struct_size_t(struct pid, numbers,
-						       level + 1),
+					 /* struct_size_t() is 6.6 and later */
+					 sizeof(struct pid) +
+						 (level + 1) * sizeof(struct upid),
 					 __alignof__(struct pid),
 					 SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT, NULL);
 	mutex_unlock(&droid_lkm_pid_caches_mutex);
@@ -131,7 +136,7 @@ bool droid_lkm_pidns_is_ours(struct pid_namespace *ns)
 	return found;
 }
 
-struct pid_namespace *droid_lkm_pidns_create(struct pid_namespace *parent)
+__nocfi noinline struct pid_namespace *droid_lkm_pidns_create(struct pid_namespace *parent)
 {
 	struct droid_lkm_pidns_entry *e;
 	struct pid_namespace *ns;
@@ -162,7 +167,7 @@ struct pid_namespace *droid_lkm_pidns_create(struct pid_namespace *parent)
 		goto out_idr;
 
 	ns->ns.ops = &droid_lkm_pidns_ops;
-	refcount_set(&ns->ns.count, 1);
+	refcount_set(droid_lkm_pidns_refcount(ns), 1);
 	ns->level = level;
 	ns->parent = parent;
 	/*
@@ -215,14 +220,14 @@ struct pid_namespace *droid_lkm_pidns_create_for_current(void)
 struct pid_namespace *droid_lkm_pidns_get(struct pid_namespace *ns)
 {
 	if (ns && ns != &init_pid_ns)
-		refcount_inc(&ns->ns.count);
+		refcount_inc(droid_lkm_pidns_refcount(ns));
 	return ns;
 }
 
 void droid_lkm_pidns_put(struct pid_namespace *ns)
 {
 
-	if (ns && ns != &init_pid_ns && !refcount_dec_not_one(&ns->ns.count))
+	if (ns && ns != &init_pid_ns && !refcount_dec_not_one(droid_lkm_pidns_refcount(ns)))
 		droid_lkm_dbg("pidns %p refcount one not dropped\n", ns);
 }
 
@@ -494,7 +499,7 @@ int droid_lkm_pidns_reboot(struct pid_namespace *ns, int cmd)
 	return 0;
 }
 
-static void droid_lkm_pidns_do_zap(struct pid_namespace *ns)
+static __nocfi noinline void droid_lkm_pidns_do_zap(struct pid_namespace *ns)
 {
 	struct pid *pid;
 	struct task_struct *task;
@@ -509,14 +514,21 @@ static void droid_lkm_pidns_do_zap(struct pid_namespace *ns)
 
 
 	rcu_read_lock();
-	read_lock(&tasklist_lock);
+	/*
+	 * a stock image may not export tasklist_lock. without it the walk stays
+	 * rcu protected but loses the task list serialization, which is what the
+	 * zapper can afford: it only sends SIGKILL to what it finds
+	 */
+	if (droid_lkm_ks_tasklist_lock)
+		read_lock(droid_lkm_ks_tasklist_lock);
 	idr_for_each_entry_continue(&ns->idr, pid, nr) {
 		task = pid_task(pid, PIDTYPE_PID);
 		if (task && !__fatal_signal_pending(task))
 			droid_lkm_ks.group_send_sig_info(SIGKILL, SEND_SIG_PRIV, task,
 						  PIDTYPE_MAX);
 	}
-	read_unlock(&tasklist_lock);
+	if (droid_lkm_ks_tasklist_lock)
+		read_unlock(droid_lkm_ks_tasklist_lock);
 	rcu_read_unlock();
 
 
@@ -604,7 +616,7 @@ void droid_lkm_pidns_queue_zap(struct pid_namespace *ns)
 	wake_up_interruptible(&droid_lkm_zap_wq);
 }
 
-static int droid_lkm_do_exit_pre(struct kprobe *p, struct pt_regs *regs)
+static __nocfi noinline int droid_lkm_do_exit_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct pid_namespace *ns = task_active_pid_ns(current);
 
@@ -718,7 +730,7 @@ static void droid_lkm_pidns_retire_reapers(void)
 	spin_unlock_irqrestore(&droid_lkm_pidns_lock, flags);
 }
 
-void droid_lkm_pidns_exit(void)
+__nocfi noinline void droid_lkm_pidns_exit(void)
 {
 	struct droid_lkm_pidns_entry *e;
 	unsigned long flags;
@@ -753,13 +765,13 @@ void droid_lkm_pidns_exit(void)
 		spin_unlock_irqrestore(&droid_lkm_pidns_lock, flags);
 
 		if (droid_lkm_ns_stashed(&e->ns->ns) ||
-		    refcount_read(&e->ns->ns.count) > 1 ||
+		    refcount_read(droid_lkm_pidns_refcount(e->ns)) > 1 ||
 		    !idr_is_empty(&e->ns->idr)) {
 
 
 			droid_lkm_warn("pidns %p neutralized+leaked (stashed=%p count=%d)\n",
 				e->ns, droid_lkm_ns_stash_ptr(&e->ns->ns),
-				refcount_read(&e->ns->ns.count));
+				refcount_read(droid_lkm_pidns_refcount(e->ns)));
 			e->ns->child_reaper = droid_lkm_pidns_retire_reaper;
 			droid_lkm_ns_neutralize(&e->ns->ns, droid_lkm_pidns_neutral_ops);
 			leaked++;
@@ -790,4 +802,142 @@ void droid_lkm_pidns_exit(void)
 		kmem_cache_destroy(droid_lkm_pidns_cachep);
 		droid_lkm_pidns_cachep = NULL;
 	}
+}
+
+/*
+ * /proc/sys/kernel/ns_last_pid. the kernel registers it under
+ * CONFIG_CHECKPOINT_RESTORE only, so a stock GKI kernel leaves a container no
+ * way to choose the next pid. the table is global like upstream's, and the
+ * handler resolves the namespace of the caller on every access.
+ *
+ * upstream reads the cursor through idr_get_cursor()/idr_set_cursor(), which are
+ * static inline in include/linux/idr.h on every branch we build for, so there is
+ * no symbol to resolve and the field is touched directly as those do.
+ */
+
+static int droid_lkm_pidns_sysctl_zero;
+static int droid_lkm_pidns_pid_max = PID_MAX_LIMIT;
+
+static int droid_lkm_pidns_ns_last_pid(DROID_LKM_CTL_TABLE *table, int write,
+				       void *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct pid_namespace *ns = task_active_pid_ns(current);
+	struct ctl_table tmp = *table;
+	int ret, next;
+
+	if (!ns)
+		return -ENOENT;
+
+	/* the owner of the namespace authorizes the write, as upstream does */
+	if (write && (!ns->user_ns ||
+		      !ns_capable(ns->user_ns, CAP_CHECKPOINT_RESTORE)))
+		return -EPERM;
+
+	/*
+	 * the cursor is volatile in a live namespace and writers are expected to
+	 * serialize among themselves, so no lock is taken here
+	 */
+	next = READ_ONCE(ns->idr.idr_next) - 1;
+
+	tmp.data = &next;
+	ret = proc_dointvec_minmax(&tmp, write, buffer, lenp, ppos);
+	if (!ret && write)
+		WRITE_ONCE(ns->idr.idr_next, next + 1);
+
+	return ret;
+}
+
+static struct ctl_table droid_lkm_pidns_sysctls[] = {
+	{
+		.procname	= "ns_last_pid",
+		.maxlen		= sizeof(int),
+		.mode		= 0666,	/* the handler checks the capability */
+		.proc_handler	= droid_lkm_pidns_ns_last_pid,
+		.extra1		= &droid_lkm_pidns_sysctl_zero,
+		.extra2		= &droid_lkm_pidns_pid_max,
+	},
+	{ }	/* 5.10 finds the end of a table through a null procname */
+};
+
+static struct ctl_table_set droid_lkm_pidns_sysctl_set;
+static struct ctl_table_header *droid_lkm_pidns_sysctl_header;
+static struct ctl_table *droid_lkm_pidns_sysctl_tbl;
+
+static struct ctl_table_set *droid_lkm_pidns_sysctl_lookup(struct ctl_table_root *root)
+{
+	return &droid_lkm_pidns_sysctl_set;
+}
+
+static int droid_lkm_pidns_sysctl_is_seen(struct ctl_table_set *set)
+{
+	return set == &droid_lkm_pidns_sysctl_set;
+}
+
+static struct ctl_table_root droid_lkm_pidns_sysctl_root = {
+	.lookup		= droid_lkm_pidns_sysctl_lookup,
+};
+
+void droid_lkm_pidns_sysctl_init(void)
+{
+	struct path path;
+	struct ctl_table *tbl;
+	int *pid_max;
+
+	if (!droid_lkm_sysctl_ready()) {
+		droid_lkm_warn("no ns_last_pid: sysctl helpers unavailable\n");
+		return;
+	}
+
+	/*
+	 * a kernel built with CONFIG_CHECKPOINT_RESTORE already registered the
+	 * file, and its handler resolves the same active namespace
+	 */
+	if (!kern_path("/proc/sys/kernel/ns_last_pid", 0, &path)) {
+		path_put(&path);
+		droid_lkm_dbg("ns_last_pid already provided by the kernel\n");
+		return;
+	}
+
+	tbl = kmemdup(droid_lkm_pidns_sysctls, sizeof(droid_lkm_pidns_sysctls),
+		      GFP_KERNEL);
+	if (!tbl) {
+		droid_lkm_warn("no ns_last_pid: out of memory\n");
+		return;
+	}
+
+	/*
+	 * the live pid_max is the upper bound upstream uses, and the static one
+	 * only has to be permissive enough for a kernel without the symbol
+	 */
+	pid_max = (int *)droid_lkm_sym("pid_max");
+	if (pid_max)
+		tbl[0].extra2 = pid_max;
+
+	droid_lkm_sysctl_setup_set(&droid_lkm_pidns_sysctl_set,
+				   &droid_lkm_pidns_sysctl_root,
+				   droid_lkm_pidns_sysctl_is_seen);
+	droid_lkm_pidns_sysctl_header = droid_lkm_sysctl_register_table(
+		&droid_lkm_pidns_sysctl_set, "kernel", tbl,
+		ARRAY_SIZE(droid_lkm_pidns_sysctls) - 1);
+	if (!droid_lkm_pidns_sysctl_header) {
+		droid_lkm_sysctl_retire_set(&droid_lkm_pidns_sysctl_set);
+		kfree(tbl);
+		droid_lkm_warn("ns_last_pid registration failed\n");
+		return;
+	}
+	droid_lkm_pidns_sysctl_tbl = tbl;
+
+	droid_lkm_info("ns_last_pid registered\n");
+}
+
+void droid_lkm_pidns_sysctl_exit(void)
+{
+	if (!droid_lkm_pidns_sysctl_header)
+		return;
+
+	unregister_sysctl_table(droid_lkm_pidns_sysctl_header);
+	droid_lkm_pidns_sysctl_header = NULL;
+	droid_lkm_sysctl_retire_set(&droid_lkm_pidns_sysctl_set);
+	kfree(droid_lkm_pidns_sysctl_tbl);
+	droid_lkm_pidns_sysctl_tbl = NULL;
 }
