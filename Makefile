@@ -38,7 +38,9 @@ droid_lkm_compat-y := $(DLC_COMPAT_OBJS) $(DEPS_OBJS_ALL)
 # third ko in the same Kbuild: kernel features the device lacks, container scoped
 #   xt matches and targets through the exported registration API
 #   cgroup pids and device effect, devtmpfs, optional link types
-obj-$(DLKM_OPT) += droid_lkm_misc.o
+# droid_lkm_misc.o is not built yet, it is unfinished; re-enable it with the
+# line below once its sources are ready
+# obj-$(DLKM_OPT) += droid_lkm_misc.o
 DLM_OBJS := src/misc/misc_main.o \
 	src/misc/misc_ksym.o \
 	src/misc/misc_scope.o \
