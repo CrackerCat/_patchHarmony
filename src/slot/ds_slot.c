@@ -1004,6 +1004,14 @@ int droid_lkm_slot_init(void)
 	memset(&droid_lkm_sc_cfg, 0, sizeof(droid_lkm_sc_cfg));
 	droid_lkm_sc_cfg.layout = &droid_lkm_sc_layout;
 	droid_lkm_sc_cfg.no_patch = true;
+	/*
+	 * the kernel primitive is the only write path this project uses, for the
+	 * same reason the text writes are pinned to it: a store through a fixmap
+	 * alias we computed ourselves is what trips MediaTek kernel protection.
+	 * inert while no_patch is set, it is here so enabling the channel later
+	 * cannot silently fall back to the slot path
+	 */
+	droid_lkm_sc_cfg.patch_mode = HK_PATCH_MODE_INSN_PATCH;
 	strscpy(droid_lkm_sc_cfg.key, "droid_lkm", sizeof(droid_lkm_sc_cfg.key));
 
 	ret = sc_init(&droid_lkm_sc_cfg);
