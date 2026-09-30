@@ -10,6 +10,7 @@
 
 #include "core.h"
 #include "hk.h"
+#include "hk_patch.h"
 #include "ds.h"
 #include "ds_caps.h"
 #include "ds_ipcns.h"
@@ -83,6 +84,17 @@ static const struct hk_cfg droid_lkm_hk_cfg = {
 	.resolve = droid_lkm_hk_resolve,
 };
 
+/*
+ * the fixmap slot path can be taken out of the picture altogether: every text
+ * write then goes through the kernel's own patch primitive, which owns the slot,
+ * the frame and the locking. a vendor kernel that prefills unused fixmap entries
+ * with poison descriptors is the case this is for. off by default, the engine
+ * keeps its frame check and falls back on its own
+ */
+static bool droid_lkm_slot_off;
+module_param_named(slot_off, droid_lkm_slot_off, bool, 0444);
+MODULE_PARM_DESC(slot_off, "never use the fixmap slot path, patch through the kernel primitive only");
+
 static int __init droid_lkm_init(void)
 {
 	int ret;
@@ -116,6 +128,10 @@ static int __init droid_lkm_init(void)
 	if (ret) {
 		droid_lkm_err("hk_init failed: %d\n", ret);
 		return ret;
+	}
+	if (droid_lkm_slot_off) {
+		hk_patch_set_slot_policy(HK_SLOT_POLICY_OFF);
+		droid_lkm_info("text writes go through the kernel patch primitive (slot path off)\n");
 	}
 
 	ret = droid_lkm_pidns_init();

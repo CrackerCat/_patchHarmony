@@ -287,7 +287,7 @@ static int droid_lkm_slot_patch(unsigned long *tab, int nr, unsigned long fn,
 		*orig_out = tab[nr];
 	droid_lkm_slot_save_cnt++;
 
-	return hk_patch_write(&tab[nr], fn);
+	return droid_lkm_patch_write(&tab[nr], fn);
 }
 
 static void droid_lkm_slot_unpatch(unsigned long *tab, int nr)
@@ -300,7 +300,7 @@ static void droid_lkm_slot_unpatch(unsigned long *tab, int nr)
 		if (droid_lkm_slot_saves[i].tab != tab ||
 		    droid_lkm_slot_saves[i].nr != nr)
 			continue;
-		(void)hk_patch_write(&tab[nr], droid_lkm_slot_saves[i].orig);
+		(void)droid_lkm_patch_write(&tab[nr], droid_lkm_slot_saves[i].orig);
 		droid_lkm_slot_saves[i] =
 			droid_lkm_slot_saves[--droid_lkm_slot_save_cnt];
 		return;

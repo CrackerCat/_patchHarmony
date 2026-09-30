@@ -14,6 +14,7 @@
 #include <linux/string.h>
 
 #include "core.h"
+#include "hk_patch.h"
 
 #define DROID_LKM_TAG "droid_lkm"
 
@@ -60,3 +61,16 @@ void droid_lkm_keepalive_sync(void);
 void droid_lkm_keepalive_release(void);
 
 #endif
+
+/*
+ * every text write of this module goes through the kernel's own patch
+ * primitive. the fixmap slot path stores through an alias we compute ourselves
+ * and MediaTek kernel protection trips on that store, which is what took the
+ * device down. the mode is pinned here so no call site can fall back to the
+ * slot path by accident
+ */
+static inline int droid_lkm_patch_write(void *dst, unsigned long val)
+{
+	return hk_patch_write_at(dst, val,
+		HK_PATCH_FLAGS_MODE(HK_PATCH_MODE_INSN_PATCH));
+}

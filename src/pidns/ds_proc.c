@@ -284,7 +284,7 @@ int droid_lkm_proc_init(void)
 		return -ENODATA;
 	}
 
-	ret = hk_patch_write(&droid_lkm_ns_dir_iops->lookup, (unsigned long)droid_lkm_ns_lookup);
+	ret = droid_lkm_patch_write(&droid_lkm_ns_dir_iops->lookup, (unsigned long)droid_lkm_ns_lookup);
 	if (ret) {
 		droid_lkm_err("cannot patch ns dir lookup: %d\n", ret);
 		return ret;
@@ -297,7 +297,7 @@ int droid_lkm_proc_init(void)
 
 	if (!try_module_get(THIS_MODULE)) {
 		droid_lkm_err("cannot pin module for the ns hook\n");
-		hk_patch_write(&droid_lkm_ns_dir_iops->lookup,
+		droid_lkm_patch_write(&droid_lkm_ns_dir_iops->lookup,
 			       (unsigned long)droid_lkm_orig_ns_lookup);
 		droid_lkm_orig_ns_lookup = NULL;
 		return -EBUSY;
@@ -317,7 +317,7 @@ void droid_lkm_proc_exit(void)
 	droid_lkm_pidns_sysctl_exit();
 
 	if (droid_lkm_ns_dir_iops && droid_lkm_orig_ns_lookup) {
-		hk_patch_write(&droid_lkm_ns_dir_iops->lookup,
+		droid_lkm_patch_write(&droid_lkm_ns_dir_iops->lookup,
 			       (unsigned long)droid_lkm_orig_ns_lookup);
 		droid_lkm_orig_ns_lookup = NULL;
 	}
