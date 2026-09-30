@@ -5,6 +5,7 @@
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 #include <linux/pid.h>
 #include <linux/pid_namespace.h>
 #include <linux/sched/signal.h>
@@ -17,6 +18,28 @@ struct droid_lkm_ksym droid_lkm_ks = { };
 int *droid_lkm_ks_sysctl_overcommit_memory;
 rwlock_t *droid_lkm_ks_tasklist_lock;
 const struct proc_ns_operations *droid_lkm_ks_ipcns_operations;
+
+/*
+ * the count is reported in one line, then one line per symbol naming the helper
+ * and what stops working without it. an unnamed count means the next device
+ * report cannot say which helper is the one that takes a feature down
+ */
+#define DROID_LKM_MISSING_MAX 40
+struct droid_lkm_missing {
+	const char *name;
+	const char *lost;
+};
+static struct droid_lkm_missing droid_lkm_missing[DROID_LKM_MISSING_MAX];
+static int droid_lkm_missing_cnt;
+
+static void droid_lkm_ksym_missing(const char *name, const char *lost)
+{
+	if (droid_lkm_missing_cnt < DROID_LKM_MISSING_MAX) {
+		droid_lkm_missing[droid_lkm_missing_cnt].name = name;
+		droid_lkm_missing[droid_lkm_missing_cnt].lost = lost;
+	}
+	droid_lkm_missing_cnt++;
+}
 
 static unsigned long __nocfi droid_lkm_resolve(const char *name)
 {
@@ -163,54 +186,117 @@ int droid_lkm_ksym_init(void)
 		droid_lkm_warn("thunk missing: sysctl_overcommit_memory\n");
 
 	/*
-	 * unexported kernel helpers. a stock image trims some of them, so the
-	 * shims refuse the feature that needs one instead of failing the load,
-	 * and the count is reported once rather than one line per symbol.
+	 * kernel helpers a stock image may not carry. the shims in this module
+	 * define the kernel names, so a name that is absent from the kernel is
+	 * refused cleanly instead of failing the load, and the report says which
+	 * one and what it costs.
 	 */
 	missing = 0;
-#define DROID_LKM_THUNK_MAYBE(_field, _name)                                   \
+#define DROID_LKM_THUNK_MAYBE(_field, _name, _lost)                            \
 	do {                                                                   \
 		DROID_LKM_THUNK_OPT(_field, _name,                             \
 				    typeof(droid_lkm_ks._field));              \
-		if (!droid_lkm_ks._field)                                      \
+		if (!droid_lkm_ks._field) {                                    \
+			droid_lkm_ksym_missing(_name, _lost);                  \
 			missing++;                                             \
+		}                                                              \
 	} while (0)
 
-	DROID_LKM_THUNK_MAYBE(dentry_open, "dentry_open");
-	DROID_LKM_THUNK_MAYBE(do_send_sig_info, "do_send_sig_info");
-	DROID_LKM_THUNK_MAYBE(fc_mount, "fc_mount");
-	DROID_LKM_THUNK_MAYBE(mntget, "mntget");
-	DROID_LKM_THUNK_MAYBE(put_fs_context, "put_fs_context");
-	DROID_LKM_THUNK_MAYBE(free_ipcs, "free_ipcs");
-	DROID_LKM_THUNK_MAYBE(put_ipc_ns, "put_ipc_ns");
-	DROID_LKM_THUNK_MAYBE(pid_nr_ns, "pid_nr_ns");
-	DROID_LKM_THUNK_MAYBE(pid_vnr, "pid_vnr");
-	DROID_LKM_THUNK_MAYBE(proc_dointvec_minmax, "proc_dointvec_minmax");
-	DROID_LKM_THUNK_MAYBE(proc_doulongvec_minmax, "proc_doulongvec_minmax");
-	DROID_LKM_THUNK_MAYBE(register_kprobe, "register_kprobe");
-	DROID_LKM_THUNK_MAYBE(unregister_kprobe, "unregister_kprobe");
-	DROID_LKM_THUNK_MAYBE(kern_path, "kern_path");
-	DROID_LKM_THUNK_MAYBE(path_put, "path_put");
-	DROID_LKM_THUNK_MAYBE(d_set_d_op, "d_set_d_op");
-	DROID_LKM_THUNK_MAYBE(down_write_killable, "down_write_killable");
-	DROID_LKM_THUNK_MAYBE(radix_tree_tagged, "radix_tree_tagged");
-	DROID_LKM_THUNK_MAYBE(vfs_unlink, "vfs_unlink");
-	DROID_LKM_THUNK_MAYBE(register_sysctl, "register_sysctl");
-	DROID_LKM_THUNK_MAYBE(unregister_sysctl_table, "unregister_sysctl_table");
-	DROID_LKM_THUNK_MAYBE(copy_ipcs, "copy_ipcs");
+	DROID_LKM_THUNK_MAYBE(dentry_open, "dentry_open",
+			      "the mqueue shim cannot open its file, mqueue stays off");
+	DROID_LKM_THUNK_MAYBE(do_send_sig_info, "do_send_sig_info",
+			      "SIGEV_SIGNAL mqueue notifications are not delivered");
+	DROID_LKM_THUNK_MAYBE(fc_mount, "fc_mount",
+			      "mqueuefs cannot be mounted, mqueue stays off");
+	DROID_LKM_THUNK_MAYBE(mntget, "mntget",
+			      "a mqueuefs mount cannot take a reference, mqueue stays off");
+	DROID_LKM_THUNK_MAYBE(put_fs_context, "put_fs_context",
+			      "the fs_context of a failed mqueuefs mount leaks");
+	DROID_LKM_THUNK_MAYBE(free_ipcs, "free_ipcs",
+			      "SysV ids cannot be released through the kernel, they leak with the namespace");
+	DROID_LKM_THUNK_MAYBE(put_ipc_ns, "put_ipc_ns",
+			      "an ipc namespace reference cannot be dropped, the namespace leaks");
+	DROID_LKM_THUNK_MAYBE(pid_nr_ns, "pid_nr_ns",
+			      "SysV status reports pid 0 for the creator and the last user");
+	DROID_LKM_THUNK_MAYBE(pid_vnr, "pid_vnr",
+			      "SysV status reports pid 0 instead of the pid seen in the namespace");
+	DROID_LKM_THUNK_MAYBE(proc_dointvec_minmax, "proc_dointvec_minmax",
+			      "the ipc limits under /proc/sys/kernel accept no writes");
+	DROID_LKM_THUNK_MAYBE(proc_doulongvec_minmax, "proc_doulongvec_minmax",
+			      "shmmax and shmall accept no writes");
+	DROID_LKM_THUNK_MAYBE(register_kprobe, "register_kprobe",
+			      "the do_exit probe is not installed, a dying container pid is not reaped by it");
+	DROID_LKM_THUNK_MAYBE(unregister_kprobe, "unregister_kprobe",
+			      "the do_exit probe cannot be removed, unload keeps it registered");
+	DROID_LKM_THUNK_MAYBE(kern_path, "kern_path",
+			      "the ns_last_pid and /proc/self/ns/mnt lookups fail, those pidns steps are skipped");
+	DROID_LKM_THUNK_MAYBE(path_put, "path_put",
+			      "a path resolved by the module is never released");
+	DROID_LKM_THUNK_MAYBE(d_set_d_op, "d_set_d_op",
+			      "the container /proc dentries keep the kernel operations and stay cached longer");
+	DROID_LKM_THUNK_MAYBE(down_write_killable, "down_write_killable",
+			      "a killable mmap lock wait becomes uninterruptible");
+	DROID_LKM_THUNK_MAYBE(radix_tree_tagged, "radix_tree_tagged",
+			      "an id lookup cannot take the tagged fast path and scans instead");
+	DROID_LKM_THUNK_MAYBE(vfs_unlink, "vfs_unlink",
+			      "a named message queue cannot be removed, mqueue stays off");
+	DROID_LKM_THUNK_MAYBE(unregister_sysctl_table, "unregister_sysctl_table",
+			      "an ipc sysctl table cannot be withdrawn and stays in /proc/sys");
+	DROID_LKM_THUNK_MAYBE(copy_ipcs, "copy_ipcs",
+			      "a kernel owned ipc namespace cannot be copied, it is refused instead");
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+	/*
+	 * register_sysctl is the one entry point before 6.1. from 6.1 on it is a
+	 * macro over register_sysctl_sz, there is no symbol to find, and this
+	 * module registers its ipc tables through setup_sysctl_set and
+	 * __register_sysctl_table instead, so the absence costs nothing
+	 */
+	DROID_LKM_THUNK_MAYBE(register_sysctl, "register_sysctl",
+			      "the SysV limits cannot be registered, they stay unexposed");
+#endif
+
+	/*
+	 * the text patch path the hook engine drives. _end and kimage_voffset are
+	 * data symbols, so a kernel built without CONFIG_KALLSYMS_ALL does not
+	 * carry them, and the engine then cannot tell a kernel image address from
+	 * a vmalloc one
+	 */
+	DROID_LKM_THUNK_MAYBE(text_start, "_text",
+			      "inline hooks have no way to translate a kernel image address");
+	DROID_LKM_THUNK_MAYBE(text_end, "_end",
+			      "inline hooks have no way to tell an image address from a module one");
+	DROID_LKM_THUNK_MAYBE(kimage_voffset, "kimage_voffset",
+			      "inline hooks on kernel image addresses are refused");
+	DROID_LKM_THUNK_MAYBE(vmalloc_to_pfn, "vmalloc_to_pfn",
+			      "inline hooks on module and vmalloc addresses are refused");
+	DROID_LKM_THUNK_MAYBE(set_fixmap, "__set_fixmap",
+			      "inline hooks cannot open the writable alias, all text patches are refused");
 #undef DROID_LKM_THUNK_MAYBE
 
 	droid_lkm_ks_tasklist_lock = (rwlock_t *)droid_lkm_resolve("tasklist_lock");
-	if (!droid_lkm_ks_tasklist_lock)
+	if (!droid_lkm_ks_tasklist_lock) {
+		droid_lkm_ksym_missing("tasklist_lock",
+				       "the pid namespace task walk cannot take the kernel lock");
 		missing++;
+	}
 	droid_lkm_ks_ipcns_operations =
 		(const struct proc_ns_operations *)droid_lkm_resolve("ipcns_operations");
-	if (!droid_lkm_ks_ipcns_operations)
+	if (!droid_lkm_ks_ipcns_operations) {
+		droid_lkm_ksym_missing("ipcns_operations",
+				       "the host ipc namespace keeps the kernel operations, ipc isolation stays off");
 		missing++;
+	}
 
-	if (missing)
-		droid_lkm_warn("%d unexported kernel helper(s) unavailable, the features that need them refuse cleanly\n",
+	if (missing) {
+		int i;
+
+		droid_lkm_warn("%d kernel helper(s) missing from kallsyms, each feature that needs one refuses cleanly:\n",
 			       missing);
+		for (i = 0; i < droid_lkm_missing_cnt &&
+			    i < ARRAY_SIZE(droid_lkm_missing); i++)
+			droid_lkm_warn("%s: %s\n", droid_lkm_missing[i].name,
+				       droid_lkm_missing[i].lost);
+	}
 
 	if (!droid_lkm_ks.proc_alloc_inum || !droid_lkm_ks.proc_free_inum ||
 	    !droid_lkm_ks.disable_pid_allocation || !droid_lkm_ks.group_send_sig_info ||
@@ -220,4 +306,42 @@ int droid_lkm_ksym_init(void)
 	}
 
 	return 0;
+}
+
+/*
+ * the hook engine turns a hooked address into a physical one: _text/_end tell an
+ * image address from a module one, kimage_voffset converts the former and
+ * vmalloc_to_pfn the latter, __set_fixmap opens the writable alias the copy goes
+ * through. the engine resolves them itself and falls back silently, so a kernel
+ * that hides _end (a data symbol, gone when CONFIG_KALLSYMS_ALL=n) has every
+ * image page translated by vmalloc_to_pfn, which cannot walk a block mapping and
+ * returns an unrelated pfn. refuse the inline hooks here instead
+ */
+bool droid_lkm_text_patch_ready(void)
+{
+	const struct {
+		unsigned long addr;
+		const char *name;
+	} need[] = {
+		{ droid_lkm_ks.text_start, "_text" },
+		{ droid_lkm_ks.text_end, "_end" },
+		{ droid_lkm_ks.kimage_voffset, "kimage_voffset" },
+		{ droid_lkm_ks.vmalloc_to_pfn, "vmalloc_to_pfn" },
+		{ droid_lkm_ks.set_fixmap, "__set_fixmap" },
+	};
+	int i;
+	int n = 0;
+
+	for (i = 0; i < ARRAY_SIZE(need); i++)
+		if (!need[i].addr)
+			n++;
+	if (!n)
+		return true;
+
+	droid_lkm_warn("inline hooks off, the text patch path is missing:");
+	for (i = 0; i < ARRAY_SIZE(need); i++)
+		if (!need[i].addr)
+			pr_cont(" %s", need[i].name);
+	pr_cont("\n");
+	return false;
 }

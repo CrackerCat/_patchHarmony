@@ -234,7 +234,23 @@ struct droid_lkm_ksym {
 	struct ipc_namespace *(*copy_ipcs)(unsigned long flags,
 					   struct user_namespace *user_ns,
 					   struct ipc_namespace *ns);
+
+	/*
+	 * the hook engine patches text through the fixmap and resolves these
+	 * itself, silently falling back when one is missing. resolving them here
+	 * too puts them in the load time report and lets the inline hooks refuse
+	 * instead of writing through a physical address that was never
+	 * translated. plain addresses on purpose: the engine owns the calls.
+	 */
+	unsigned long text_start;	/* _text */
+	unsigned long text_end;		/* _end */
+	unsigned long kimage_voffset;	/* kimage_voffset */
+	unsigned long vmalloc_to_pfn;	/* vmalloc_to_pfn */
+	unsigned long set_fixmap;	/* __set_fixmap */
 };
+
+/* false when the text patch path cannot run on this kernel, one warning names what is missing */
+bool droid_lkm_text_patch_ready(void);
 
 extern struct droid_lkm_ksym droid_lkm_ks;
 

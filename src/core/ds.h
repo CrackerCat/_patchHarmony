@@ -9,7 +9,9 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/printk.h>
+#include <linux/string.h>
 
 #include "core.h"
 
@@ -29,10 +31,24 @@ extern bool droid_lkm_verbose;
 			pr_info("[" DROID_LKM_TAG "/dbg] " fmt, ##__VA_ARGS__);        \
 	} while (0)
 
-// kallsyms bootstrap, module symbols via module_kallsyms fallback
+/*
+ * kallsyms bootstrap, module symbols via module_kallsyms fallback
+ *
+ * the shims in this module are deliberately defined under the kernel's own
+ * names, and that fallback searches the module tables too, so a kernel that
+ * does not carry the name hands back the shim defined here instead. that is not
+ * the kernel symbol: a shim whose body calls the resolved pointer calls itself.
+ * the hook wrappers are this module's own symbols by design and carry the
+ * module prefix, everything else that lands inside the module is a shim
+ */
 static inline unsigned long __nocfi droid_lkm_sym(const char *name)
 {
-	return kallrecon_klp(name);
+	unsigned long addr = kallrecon_klp(name);
+
+	if (addr && within_module(addr, THIS_MODULE) &&
+	    strncmp(name, DROID_LKM_TAG, sizeof(DROID_LKM_TAG) - 1))
+		return 0;
+	return addr;
 }
 
 void droid_lkm_reset_task_ns_refs(void);

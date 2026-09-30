@@ -4,6 +4,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/percpu.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
@@ -163,6 +164,27 @@ int dlc_ghost_init(void)
 		pr_err("[droid_lkm_compat] ghost: __module_address not found\n");
 		dlc_ghost_ready = false;
 		return -ENOENT;
+	}
+
+	/*
+	 * the engine patches the end of a branch chain when the entry is a thunk,
+	 * and on a +lto kernel find_task_by_vpid is one. the trampoline of that
+	 * build loops back into the patched entry, so a call recurses until the
+	 * kernel stack is gone. judge the entry first and refuse a shape the
+	 * engine cannot drive, the feature degrades instead of panicking
+	 */
+	{
+		struct hk_inline_probe probe;
+
+		memset(&probe, 0, sizeof(probe));
+		if (!hk_inline_probe("find_task_by_vpid", &probe) &&
+		    probe.state != HK_INLINE_PLAIN) {
+			pr_err("[droid_lkm_compat] ghost: find_task_by_vpid entry state %d (%s) target 0x%lx, inline hook refused\n",
+			       probe.state, probe.reason ? probe.reason : "?",
+			       probe.target);
+			dlc_ghost_ready = false;
+			return -EOPNOTSUPP;
+		}
 	}
 
 	ret = hk_inline_hook(&dlc_ftbv_hook, "find_task_by_vpid", "dlc_ftbv_wrap");
