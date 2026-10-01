@@ -80,24 +80,32 @@ static unsigned long __nocfi droid_lkm_hk_resolve(const char *name)
 	return droid_lkm_sym(name);
 }
 
-static const struct hk_cfg droid_lkm_hk_cfg = {
+/*
+ * the write path is chosen once, here. the slot path stores through an alias this
+ * module maps itself, and MediaTek kernel protection trips on that store on this
+ * device, which is what took it down, so the kernel's own primitive is the path
+ * every write takes. the slot_on parameter brings the slot path back for a
+ * kernel that allows it
+ */
+static struct hk_cfg droid_lkm_hk_cfg = {
 	.resolve = droid_lkm_hk_resolve,
+	.write = hk_write_kernel,
 };
 
-/*
- * the fixmap slot path can be taken out of the picture altogether: every text
- * write then goes through the kernel's own patch primitive, which owns the slot,
- * the frame and the locking. a vendor kernel that prefills unused fixmap entries
- * with poison descriptors is the case this is for. off by default, the engine
- * keeps its frame check and falls back on its own
- */
 static bool droid_lkm_slot_on;
 module_param_named(slot_on, droid_lkm_slot_on, bool, 0444);
-MODULE_PARM_DESC(slot_on, "allow the engine fixmap slot path, off by default: that store trips MediaTek kernel protection");
+MODULE_PARM_DESC(slot_on, "use the engine fixmap slot path instead of the kernel primitive, off by default: that store trips MediaTek kernel protection");
+
+bool droid_lkm_inline_hooks_on;
+static bool droid_lkm_inline_hook;
+module_param_named(inline_hook, droid_lkm_inline_hook, bool, 0444);
+MODULE_PARM_DESC(inline_hook, "install inline hooks, off by default");
 
 static int __init droid_lkm_init(void)
 {
 	int ret;
+
+	droid_lkm_inline_hooks_on = droid_lkm_inline_hook;
 
 	find_kallsyms_base();
 	if (!klnum_val || !kallrecon_klp) {
@@ -124,15 +132,16 @@ static int __init droid_lkm_init(void)
 	if (ret)
 		return ret;
 
+	if (droid_lkm_slot_on)
+		droid_lkm_hk_cfg.write = hk_write_fixmap;
+
 	ret = hk_init(&droid_lkm_hk_cfg);
 	if (ret) {
 		droid_lkm_err("hk_init failed: %d\n", ret);
 		return ret;
 	}
-	if (!droid_lkm_slot_on) {
-		hk_patch_set_slot_policy(HK_SLOT_POLICY_OFF);
-		droid_lkm_info("slot path off: every text write goes through the kernel primitive\n");
-	}
+	droid_lkm_info("write path: %s\n",
+		       droid_lkm_slot_on ? "engine fixmap slot" : "kernel primitive");
 
 	ret = droid_lkm_pidns_init();
 	if (ret)

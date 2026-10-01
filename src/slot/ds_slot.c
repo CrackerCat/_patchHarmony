@@ -760,7 +760,7 @@ static int droid_lkm_nsproxy_hook_install(void)
 	droid_lkm_check_unshare_flags_fn =
 		(int (*)(unsigned long))droid_lkm_sym("check_unshare_flags");
 
-	ret = hk_inline_hook(&droid_lkm_cnn_hook, "create_new_namespaces",
+	ret = droid_lkm_inline_hook(&droid_lkm_cnn_hook, "create_new_namespaces",
 			     "droid_lkm_cnn_wrap");
 	if (ret) {
 		droid_lkm_warn("nsproxy hook unavailable (%d): clone/clone3 CLONE_NEWPID|NEWIPC stay EINVAL, unshare uses the legacy path\n",
@@ -968,7 +968,7 @@ static int droid_lkm_clone_slot_install(void)
 
 static int droid_lkm_copy_namespaces_hook_install(void)
 {
-	int ret = hk_inline_hook(&droid_lkm_cn_hook, "copy_namespaces", "droid_lkm_cn_wrap");
+	int ret = droid_lkm_inline_hook(&droid_lkm_cn_hook, "copy_namespaces", "droid_lkm_cn_wrap");
 
 	if (ret) {
 		droid_lkm_warn("copy_namespaces hook unavailable (%d)\n", ret);
@@ -1008,10 +1008,9 @@ int droid_lkm_slot_init(void)
 	 * the kernel primitive is the only write path this project uses, for the
 	 * same reason the text writes are pinned to it: a store through a fixmap
 	 * alias we computed ourselves is what trips MediaTek kernel protection.
-	 * inert while no_patch is set, it is here so enabling the channel later
-	 * cannot silently fall back to the slot path
+	 * the path is pinned in hk_cfg.write, so the channel takes the kernel
+	 * primitive as well and cannot fall back to the slot path
 	 */
-	droid_lkm_sc_cfg.patch_mode = HK_PATCH_MODE_INSN_PATCH;
 	strscpy(droid_lkm_sc_cfg.key, "droid_lkm", sizeof(droid_lkm_sc_cfg.key));
 
 	ret = sc_init(&droid_lkm_sc_cfg);

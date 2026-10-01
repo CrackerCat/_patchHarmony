@@ -66,11 +66,28 @@ void droid_lkm_keepalive_release(void);
  * every text write of this module goes through the kernel's own patch
  * primitive. the fixmap slot path stores through an alias we compute ourselves
  * and MediaTek kernel protection trips on that store, which is what took the
- * device down. the mode is pinned here so no call site can fall back to the
- * slot path by accident
+ * device down. the path is pinned in hk_cfg.write at init, so no call site can
+ * fall back to the slot path by accident
  */
 static inline int droid_lkm_patch_write(void *dst, unsigned long val)
 {
-	return hk_patch_write_at(dst, val,
-		HK_PATCH_FLAGS_MODE(HK_PATCH_MODE_INSN_PATCH));
+	return hk_patch_write(dst, val);
+}
+
+/*
+ * inline hooks rewrite the entry of a live kernel function. the device owner
+ * suspects the hypervisor refuses that store on MTK, so they are off by default
+ * while everything else (syscall table, ids, sysctls) stays on. inline_hook=1
+ * brings them back. a refused hook is not fatal: every caller already degrades
+ */
+extern bool droid_lkm_inline_hooks_on;
+
+static inline int droid_lkm_inline_hook(struct hk_inline *h, const char *sym,
+					const char *wrap)
+{
+	if (!droid_lkm_inline_hooks_on) {
+		droid_lkm_warn_once("inline hooks are off (inline_hook=0), %s not hooked\n", sym);
+		return -EOPNOTSUPP;
+	}
+	return hk_inline_hook(h, sym, wrap);
 }
