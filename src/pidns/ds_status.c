@@ -102,7 +102,7 @@ int droid_lkm_status_init(void)
 		return -ENODATA;
 	}
 
-	ret = droid_lkm_inline_hook(&droid_lkm_status_hook, "proc_pid_status",
+	ret = droid_lkm_do_inline_hook(&droid_lkm_status_hook, "proc_pid_status",
 			     "droid_lkm_status_wrap");
 	if (ret) {
 		droid_lkm_warn("NSpid emulation skipped, proc_pid_status hook failed (%d)\n",

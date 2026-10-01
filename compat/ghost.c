@@ -31,6 +31,24 @@ MODULE_PARM_DESC(ghost_match, "caller module name prefix, * matches all, default
 
 static typeof(&find_task_by_vpid) dlc_ftbv_orig;
 static typeof(&__module_address) dlc_module_address;
+extern bool dlc_inline_hooks_on;
+
+/*
+ * inline hooks rewrite the entry of a live kernel function and the device owner
+ * suspects the hypervisor refuses that store on MTK, so they are off by default
+ * while everything else stays on. inline_hook=1 brings them back, a refused hook
+ * is not fatal, the ghost feature just stays unavailable
+ */
+static inline int dlc_inline_hook(struct hk_inline *h, const char *sym,
+				  const char *wrap)
+{
+	if (!dlc_inline_hooks_on) {
+		pr_warn_once("[droid_lkm_compat] inline hooks are off (inline_hook=0), %s not hooked\n", sym);
+		return -EOPNOTSUPP;
+	}
+	return hk_inline_hook(h, sym, wrap);
+}
+
 static struct hk_inline dlc_ftbv_hook;
 static struct task_struct dlc_ghost_task;
 static bool dlc_ghost_ready;
@@ -187,7 +205,7 @@ int dlc_ghost_init(void)
 		}
 	}
 
-	ret = hk_inline_hook(&dlc_ftbv_hook, "find_task_by_vpid", "dlc_ftbv_wrap");
+	ret = dlc_inline_hook(&dlc_ftbv_hook, "find_task_by_vpid", "dlc_ftbv_wrap");
 	if (ret) {
 		pr_err("[droid_lkm_compat] ghost: hook find_task_by_vpid failed %d\n", ret);
 		dlc_ghost_ready = false;

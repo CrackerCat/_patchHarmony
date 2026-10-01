@@ -23,6 +23,11 @@ static const struct hk_cfg dlc_hk_cfg = {
 	.resolve = dlc_hk_resolve,
 };
 
+bool dlc_inline_hooks_on;
+static bool dlc_inline_hook;
+module_param_named(inline_hook, dlc_inline_hook, bool, 0444);
+MODULE_PARM_DESC(inline_hook, "install inline hooks, off by default");
+
 static int __init droid_lkm_compat_init(void)
 {
 	int ret;

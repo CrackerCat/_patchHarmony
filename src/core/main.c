@@ -133,7 +133,13 @@ static int __init droid_lkm_init(void)
 		return ret;
 
 	if (droid_lkm_slot_on)
-		droid_lkm_hk_cfg.write = hk_write_fixmap;
+		/*
+		 * no write callback: the library takes the kernel's own patch primitive,
+		 * which uses the kernel's fixmap slot and the kernel's own arithmetic.
+		 * asking for hk_write_fixmap instead made every engine write, inline
+		 * hooks included, store through an alias this module computed itself,
+		 * and that is the store that faulted on the MTK device
+		 */
 
 	ret = hk_init(&droid_lkm_hk_cfg);
 	if (ret) {
