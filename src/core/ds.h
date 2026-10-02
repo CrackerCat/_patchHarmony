@@ -85,12 +85,7 @@ static inline int droid_lkm_patch_write(void *dst, unsigned long val)
  */
 extern bool droid_lkm_inline_hooks_on;
 
-static inline int droid_lkm_do_inline_hook(struct hk_inline *h, const char *sym,
-					const char *wrap)
-{
-	if (!droid_lkm_inline_hooks_on) {
-		pr_warn_once("[droid_lkm] inline hooks are off (inline_hook=0), %s not hooked\n", sym);
-		return -EOPNOTSUPP;
-	}
-	return hk_inline_hook(h, sym, wrap);
-}
+int droid_lkm_do_inline_hook(struct hk_inline *h, const char *sym,
+			     const char *wrap);
+void droid_lkm_hook_policy_apply(void);
+

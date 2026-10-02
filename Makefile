@@ -122,7 +122,7 @@ MUNMAP_UNIT := $(shell if grep -qE ' [tT] do_vmi_munmap$$' $(KDIR)/System.map 2>
 	elif grep -qE ' [tT] do_mas_munmap$$' $(KDIR)/System.map 2>/dev/null; then echo src/ipcns/munmap_mas.o; \
 	else echo src/ipcns/munmap_legacy.o; fi)
 
-droid_lkm-y := src/core/main.o \
+droid_lkm-y := src/core/main.o src/core/ds_hook.o \
 	$(MUNMAP_UNIT) \
 	src/core/ds_ksym.o \
 	src/core/ds_caps.o \
